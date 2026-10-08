@@ -1,20 +1,9 @@
 @echo off
 setlocal
 
-set "DURATION_DAYS=%~1"
 set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
 set "PYTHON_CMD="
 set "PYTHON_ARGS="
-
-if "%DURATION_DAYS%"=="" (
-    set /p "DURATION_DAYS=Enter license duration in days: "
-)
-
-if "%DURATION_DAYS%"=="" (
-    echo License duration is required.
-    pause
-    exit /b 1
-)
 
 if exist "%PYTHON_EXE%" (
     "%PYTHON_EXE%" --version >nul 2>nul
@@ -45,12 +34,12 @@ if not defined PYTHON_CMD (
     exit /b 1
 )
 
-"%PYTHON_CMD%" %PYTHON_ARGS% "%~dp0generate_license.py" %DURATION_DAYS%
-
-if errorlevel 1 (
-    pause
-    exit /b %errorlevel%
-)
+echo V-CODE now uses Activation Keys instead of license.lic files.
+echo.
+echo Usage:
+echo   %PYTHON_CMD% %PYTHON_ARGS% "%~dp0generate_activation.py" --device-id VC-1234-5678-ABCD-EF12-3456 --customer "Customer A" --edition Professional --days 30 --private-key C:\Secure\VCodeKeys\vcode-activation-private.pem
+echo.
+echo See README.md for the full admin workflow.
 
 pause
 endlocal

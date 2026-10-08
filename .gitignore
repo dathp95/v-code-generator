@@ -1,0 +1,19 @@
+# Private key material
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Generated activation data
+output/
+activation.dat
+activation-*.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Build
+build/
+dist/
