@@ -1,0 +1,149 @@
+"""
+generate_license.py
+
+Generate a signed license file for Python UDS Analyzer.
+
+Output:
+    output/license.lic
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import argparse
+from pathlib import Path
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+
+from datetime import datetime, timedelta
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+
+PRIVATE_KEY_FILE = BASE_DIR / "private.pem"
+
+OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_FILE = OUTPUT_DIR / "license.lic"
+
+LICENSE_VERSION = 1
+LICENSE_ALGORITHM = "RSA-PSS-SHA256"
+DEFAULT_LICENSE_DURATION_DAYS = 30
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def load_private_key():
+    return serialization.load_pem_private_key(
+        PRIVATE_KEY_FILE.read_bytes(),
+        password=None,
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate a signed license file.",
+    )
+    parser.add_argument(
+        "duration_days",
+        nargs="?",
+        type=int,
+        default=DEFAULT_LICENSE_DURATION_DAYS,
+        help=f"License duration in days. Default: {DEFAULT_LICENSE_DURATION_DAYS}.",
+    )
+
+    args = parser.parse_args()
+
+    if args.duration_days <= 0:
+        parser.error("duration_days must be a positive integer.")
+
+    return args
+
+
+def create_license(duration_days: int) -> dict:
+    issue_date = datetime.now()
+    expire_date = issue_date + timedelta(days=duration_days)
+
+    return {
+        "customer": "AES",
+        "edition": "Professional",
+        "issue_date": issue_date.isoformat(timespec="seconds"),
+        "expire_date": expire_date.isoformat(timespec="seconds"),
+        "metadata": {
+            "company": "DAT TRAN AES",
+            "duration_days": duration_days,
+        },
+    }
+
+
+def create_payload(license_data: dict) -> bytes:
+    return json.dumps(
+        license_data,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def sign_payload(
+    payload: bytes,
+) -> bytes:
+    private_key = load_private_key()
+
+    return private_key.sign(
+        payload,
+        padding.PSS(
+            mgf=padding.MGF1(
+                hashes.SHA256(),
+            ),
+            salt_length=padding.PSS.MAX_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+
+
+def export_license(duration_days: int) -> None:
+    payload = create_payload(
+        create_license(duration_days),
+    )
+
+    signature = sign_payload(payload)
+
+    license_file = {
+        "version": LICENSE_VERSION,
+        "algorithm": LICENSE_ALGORITHM,
+        "payload": base64.b64encode(payload).decode("ascii"),
+        "signature": base64.b64encode(signature).decode("ascii"),
+    }
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    OUTPUT_FILE.write_text(
+        json.dumps(
+            license_file,
+            indent=4,
+        ),
+        encoding="utf-8",
+    )
+
+    print("License generated successfully.")
+    print(f"Duration : {duration_days} day(s)")
+    print(f"Output : {OUTPUT_FILE.resolve()}")
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+if __name__ == "__main__":
+    cli_args = parse_args()
+    export_license(cli_args.duration_days)
