@@ -168,8 +168,17 @@ def main() -> None:
     print(activation_key)
     print()
     print(f"License ID : {payload['license_id']}")
-    print(f"Issued UTC : {payload['issued_at']}")
-    print(f"Expires UTC: {payload['expires_at']}")
+    
+    issued_local = datetime.fromisoformat(
+    payload["issued_at"].replace("Z", "+00:00")
+    ).astimezone()
+
+    expires_local = datetime.fromisoformat(
+        payload["expires_at"].replace("Z", "+00:00")
+    ).astimezone()
+
+    print(f"Issued local : {issued_local:%d/%m/%Y %H:%M:%S }")
+    print(f"Expires local: {expires_local:%d/%m/%Y %H:%M:%S }")
 
     if args.output_file:
         output_file = args.output_file.expanduser()
