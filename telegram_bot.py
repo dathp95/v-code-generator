@@ -407,34 +407,106 @@ async def receive_form(
         )
         return
 
-    try:
-        activation_key, payload = generate_activation_key(
-            device_id=form["device_id"],
-            customer="Test Customer",
-            edition="Professional",
-            days=days,
-            private_key=context.application.bot_data["private_key"],
-        )
-    except ValueError as error:
-        await message.reply_text(f"Không tạo được key: {error}")
-        return
+    request_id = form.get("request_id")
+    request = None
 
-    context.user_data.pop("key_form", None)
+    if request_id:
+        request = context.application.bot_data.get(
+            "activation_requests", {}
+        ).get(request_id)
+
+        if request is None or request["status"] == "sent":
+            context.user_data.pop("key_form", None)
+            await message.reply_text(
+                "Yêu cầu không còn hợp lệ hoặc đã được gửi key."
+            )
+            return
+
+    # Nếu lần gửi trước lỗi, dùng lại key đã tạo.
+    if request is not None and "activation_key" in request:
+        if days != request["days"]:
+            await message.reply_text(
+                f"Key đã tạo với {request['days']} ngày.\n"
+                "Nhập lại đúng số ngày đó để thử gửi lại."
+            )
+            return
+
+        activation_key = request["activation_key"]
+        payload = request["payload"]
+    else:
+        try:
+            activation_key, payload = generate_activation_key(
+                device_id=form["device_id"],
+                customer=(
+                    request["customer"]
+                    if request is not None
+                    else "Test Customer"
+                ),
+                edition="Professional",
+                days=days,
+                private_key=context.application.bot_data["private_key"],
+            )
+        except ValueError as error:
+            await message.reply_text(f"Không tạo được key: {error}")
+            return
+
+        if request is not None:
+            request["activation_key"] = activation_key
+            request["payload"] = payload
+            request["days"] = days
 
     expires_local = datetime.fromisoformat(
         payload["expires_at"].replace("Z", "+00:00")
     ).astimezone()
 
-    await message.reply_text(
-        "✅ Đã tạo activation key\n\n"
+    summary = (
         f"Machine ID: {payload['device_id']}\n"
         f"Edition: {payload['edition']}\n"
         f"Duration: {days} ngày\n"
         f"Expires: {expires_local:%d/%m/%Y %H:%M:%S %z}"
     )
 
-    await message.reply_text(activation_key)
+    # Tạo từ yêu cầu khách: gửi key tới đúng chat đã lưu.
+    if request is not None:
+        try:
+            await context.bot.send_message(
+                chat_id=request["chat_id"],
+                text=(
+                    "✅ License V-CODE của bạn đã được cấp!\n\n"
+                    f"{summary}\n\n"
+                    "Activation Key:\n"
+                    f"{activation_key}\n\n"
+                    "Copy toàn bộ chuỗi key ở trên.\n"
+                    "Mở V-CODE → License Support → "
+                    "dán vào Activation Key → Activate."
+                ),
+                parse_mode=None,
+            )
+        except TelegramError:
+            await message.reply_text(
+                "⚠️ Đã tạo key nhưng chưa xác nhận gửi thành công.\n"
+                f"Nhập lại {days} để thử gửi cùng key.\n"
+                "Nếu khách chặn bot, hãy nhờ khách bỏ chặn."
+            )
+            return
 
+        request["status"] = "sent"
+        context.user_data.pop("key_form", None)
+
+        await message.reply_text(
+            f"✅ Đã gửi key cho {request['customer']}.\n\n"
+            f"{summary}",
+            reply_markup=build_menu(is_admin=True),
+        )
+        return
+
+    # Tạo thủ công từ menu: trả key cho Admin.
+    context.user_data.pop("key_form", None)
+
+    await message.reply_text(
+        f"✅ Đã tạo activation key\n\n{summary}"
+    )
+    await message.reply_text(activation_key)
     await message.reply_text(
         "Chọn chức năng tiếp theo:",
         reply_markup=build_menu(is_admin=True),
