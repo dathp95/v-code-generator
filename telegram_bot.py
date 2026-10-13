@@ -12,6 +12,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import TelegramError
+from uuid import uuid4
 
 from datetime import datetime
 
@@ -310,6 +311,17 @@ async def receive_form(
             if user.username
             else "Không có username"
         )
+        
+        request_id = uuid4().hex
+        requests = context.application.bot_data.setdefault(
+            "activation_requests", {}
+        )
+        requests[request_id] = {
+            "chat_id": chat.id,
+            "device_id": device_id,
+            "customer": user.full_name,
+            "status": "pending",
+        }
 
         try:
             await context.bot.send_message(
@@ -327,7 +339,7 @@ async def receive_form(
                     [
                         InlineKeyboardButton(
                             "🔑 Tạo key — Admin",
-                            callback_data="menu:generate",
+                            callback_data=f"request:{request_id}",
                         )
                     ]
                 ]),
@@ -428,6 +440,64 @@ async def receive_form(
         reply_markup=build_menu(is_admin=True),
     )
 
+async def select_request(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    chat = update.effective_chat
+
+    if query is None:
+        return
+
+    admin_id = context.application.bot_data["admin_id"]
+
+    if (
+        query.from_user.id != admin_id
+        or chat is None
+        or chat.type != "private"
+    ):
+        await query.answer("Chỉ Admin được cấp key.", show_alert=True)
+        return
+
+    request_id = (query.data or "").split(":", 1)[-1]
+    request = context.application.bot_data.get(
+        "activation_requests", {}
+    ).get(request_id)
+
+    if request is None:
+        await query.answer(
+            "Yêu cầu không còn trong bộ nhớ. Hãy nhờ khách gửi lại ID.",
+            show_alert=True,
+        )
+        return
+
+    if request["status"] == "sent":
+        await query.answer(
+            "Key đã được gửi cho yêu cầu này.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    context.user_data["key_form"] = {
+        "step": "days",
+        "device_id": request["device_id"],
+        "request_id": request_id,
+    }
+
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=(
+            f"Khách: {request['customer']}\n"
+            f"Machine ID: {request['device_id']}\n\n"
+            "Nhập số ngày từ 1 đến 3650.\n"
+            "Bot sẽ gửi key trực tiếp cho khách sau khi tạo.\n"
+            "Gửi /cancel để hủy."
+        ),
+    )
+
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     admin_text = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
@@ -477,6 +547,9 @@ def main():
             filters.TEXT & ~filters.COMMAND,
             receive_form,
         )
+    )
+    app.add_handler(
+        CallbackQueryHandler(select_request, pattern=r"^request:")
     )
     app.run_polling()
 
