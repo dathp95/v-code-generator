@@ -20,7 +20,7 @@ from generate_activation import (
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
-async def build_menu(is_admin=False):
+def build_menu(is_admin=False):
     buttons = [
         [
             InlineKeyboardButton(
