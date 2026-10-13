@@ -8,6 +8,8 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
 )
 
 from datetime import datetime
@@ -15,6 +17,7 @@ from datetime import datetime
 from generate_activation import (
     generate_activation_key,
     load_private_key,
+    validate_device_id,
 )
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -71,9 +74,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_admin = user.id == context.application.bot_data["admin_id"]
 
+    context.user_data.pop("key_form", None)
+    
     await message.reply_text(
         "🚗 Chào mừng bạn đến với V-CODE!\n\n"
         "Chọn chức năng bên dưới để tiếp tục.",
+
         reply_markup=build_menu(is_admin),
     )
 
@@ -107,6 +113,23 @@ async def menu_click(
         return
 
     await query.answer()
+    
+    # Selecting any menu item cancels the previous input flow.
+    context.user_data.pop("key_form", None)
+
+    if query.data == "menu:generate":
+        context.user_data["key_form"] = {"step": "device"}
+
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                "🔑 TẠO ACTIVATION KEY\n\n"
+                "Bước 1/2: Dán Machine ID cần kích hoạt.\n\n"
+                "Ví dụ: VC-06CF-43DB-D96E-1BED-B3E0\n"
+                "Gửi /cancel để hủy."
+            ),
+        )
+        return
 
     content = {
         "menu:guide": (
@@ -196,6 +219,8 @@ async def generate(
         if user.id != admin_id or chat.type != "private":
             await message.reply_text("Bạn không có quyền cấp activation key.")
             return
+        # Hủy luồng nhập Machine ID / Days đang dang dở.
+        context.user_data.pop("key_form", None)
 
         if len(context.args) != 2:
             await message.reply_text(
@@ -238,6 +263,112 @@ async def generate(
         # Send the key separately for easy copying.
         await message.reply_text(activation_key)
 
+async def cancel_form(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    context.user_data.pop("key_form", None)
+
+    if update.effective_message is not None:
+        await update.effective_message.reply_text("Đã hủy nhập thông tin.")
+
+    await start(update, context)
+
+
+async def receive_form(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    message = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if message is None or user is None or chat is None:
+        return
+
+    # Check permission again when processing each input.
+    if (
+        user.id != context.application.bot_data["admin_id"]
+        or chat.type != "private"
+    ):
+        return
+
+    form = context.user_data.get("key_form")
+    if form is None:
+        await message.reply_text(
+            "Gửi /menu rồi chọn Tạo key — Admin để bắt đầu."
+        )
+        return
+
+    text = (message.text or "").strip()
+
+    if form["step"] == "device":
+        try:
+            device_id = validate_device_id(text)
+        except ValueError:
+            await message.reply_text(
+                "Machine ID không đúng định dạng. Hãy dán lại:\n"
+                "VC-XXXX-XXXX-XXXX-XXXX-XXXX"
+            )
+            return
+
+        form["device_id"] = device_id
+        form["step"] = "days"
+
+        await message.reply_text(
+            f"Machine ID: {device_id}\n\n"
+            "Bước 2/2: Nhập số ngày, ví dụ 30.\n"
+            "Cho phép từ 1 đến 3650 ngày.\n"
+            "Gửi /cancel để hủy."
+        )
+        return
+
+    if form["step"] != "days":
+        return
+
+    try:
+        days = int(text)
+        if not 1 <= days <= 3650:
+            raise ValueError
+    except ValueError:
+        await message.reply_text(
+            "Hãy nhập số nguyên từ 1 đến 3650, ví dụ: 30."
+        )
+        return
+
+    try:
+        activation_key, payload = generate_activation_key(
+            device_id=form["device_id"],
+            customer="Test Customer",
+            edition="Professional",
+            days=days,
+            private_key=context.application.bot_data["private_key"],
+        )
+    except ValueError as error:
+        await message.reply_text(f"Không tạo được key: {error}")
+        return
+
+    # Finish the input flow before sending the result.
+    context.user_data.pop("key_form", None)
+
+    expires_local = datetime.fromisoformat(
+        payload["expires_at"].replace("Z", "+00:00")
+    ).astimezone()
+
+    await message.reply_text(
+        "✅ Đã tạo activation key\n\n"
+        f"Machine ID: {payload['device_id']}\n"
+        f"Edition: {payload['edition']}\n"
+        f"Duration: {days} ngày\n"
+        f"Expires: {expires_local:%d/%m/%Y %H:%M:%S %z}"
+    )
+
+    await message.reply_text(activation_key)
+
+    await message.reply_text(
+        "Chọn chức năng tiếp theo:",
+        reply_markup=build_menu(is_admin=True),
+    )
 
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -282,6 +413,13 @@ def main():
     )
 
     print("Bot đang chạy. Nhấn Ctrl+C để dừng.")
+    app.add_handler(CommandHandler("cancel", cancel_form))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            receive_form,
+        )
+    )
     app.run_polling()
 
 
