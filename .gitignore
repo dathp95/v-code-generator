@@ -11,9 +11,13 @@ activation-*.json
 
 # Python
 .venv/
+.env
 __pycache__/
 *.pyc
 
 # Build
 build/
 dist/
+
+# Local script containing secrets
+create_activation.bat
