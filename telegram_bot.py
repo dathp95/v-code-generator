@@ -11,6 +11,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.error import TelegramError
 
 from datetime import datetime
 
@@ -286,23 +287,77 @@ async def receive_form(
     if message is None or user is None or chat is None:
         return
 
-    # Check permission again when processing each input.
-    if (
-        user.id != context.application.bot_data["admin_id"]
-        or chat.type != "private"
-    ):
+    if chat.type != "private":
         return
 
-    form = context.user_data.get("key_form")
-    if form is None:
+    admin_id = context.application.bot_data["admin_id"]
+    text = (message.text or "").strip()
+
+    # KHÁCH: gửi yêu cầu kích hoạt tới Admin.
+    if user.id != admin_id:
+        try:
+            device_id = validate_device_id(text)
+        except ValueError:
+            await message.reply_text(
+                "Để yêu cầu kích hoạt, hãy dán Machine ID từ V-CODE:\n"
+                "License Support → Copy ID.\n\n"
+                "Định dạng: VC-XXXX-XXXX-XXXX-XXXX-XXXX"
+            )
+            return
+
+        username = (
+            f"@{user.username}"
+            if user.username
+            else "Không có username"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    "📩 YÊU CẦU KÍCH HOẠT V-CODE\n\n"
+                    f"Khách: {user.full_name}\n"
+                    f"Username: {username}\n"
+                    f"Telegram User ID: {user.id}\n"
+                    f"Machine ID: {device_id}\n\n"
+                    "Chọn Tạo key — Admin để cấp license."
+                ),
+                parse_mode=None,
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔑 Tạo key — Admin",
+                            callback_data="menu:generate",
+                        )
+                    ]
+                ]),
+            )
+        except TelegramError:
+            await message.reply_text(
+                "⚠️ Chưa gửi được yêu cầu tới Admin.\n"
+                "Vui lòng thử lại sau hoặc liên hệ hỗ trợ."
+            )
+            return
+
         await message.reply_text(
-            "Gửi /menu rồi chọn Tạo key — Admin để bắt đầu."
+            "✅ Yêu cầu đã được gửi tới Admin.\n\n"
+            f"Machine ID: {device_id}\n\n"
+            "Vui lòng chờ người hỗ trợ liên hệ.",
+            reply_markup=build_menu(is_admin=False),
         )
         return
 
-    text = (message.text or "").strip()
+    # ADMIN: xử lý luồng nhập Machine ID → Days.
+    form = context.user_data.get("key_form")
 
-    if form["step"] == "device":
+    if form is None:
+        await message.reply_text(
+            "Gửi /menu rồi chọn Tạo key — Admin để bắt đầu.",
+            reply_markup=build_menu(is_admin=True),
+        )
+        return
+
+    if form.get("step") == "device":
         try:
             device_id = validate_device_id(text)
         except ValueError:
@@ -323,7 +378,11 @@ async def receive_form(
         )
         return
 
-    if form["step"] != "days":
+    if form.get("step") != "days":
+        context.user_data.pop("key_form", None)
+        await message.reply_text(
+            "Phiên nhập không hợp lệ. Gửi /menu để bắt đầu lại."
+        )
         return
 
     try:
@@ -348,7 +407,6 @@ async def receive_form(
         await message.reply_text(f"Không tạo được key: {error}")
         return
 
-    # Finish the input flow before sending the result.
     context.user_data.pop("key_form", None)
 
     expires_local = datetime.fromisoformat(
