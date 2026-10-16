@@ -80,11 +80,11 @@ def main():
 
         for name, index in (("light", 0), ("dark", 1)):
             window.settings_tab.theme_choice.setCurrentIndex(index)
-            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "settings")):
+            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "telegram"), (4, "settings")):
                 window.tabs.setCurrentIndex(tab)
                 if tab < 3:
                     (window.requests, window.licenses, window.deliveries)[tab].table.selectRow(0)
-                if tab == 3:
+                if tab == 4:
                     settings = window.settings_tab
                     settings.path.setText(str(root / "missing-test-key.pem"))
                     settings.password.setText("temporary-only")
@@ -107,12 +107,14 @@ def main():
             capture(dialog, f"{name}-issue-review")
             dialog.reject()
             window.session.lock()
-        window.tabs.setCurrentIndex(0)
+        window.tabs.setCurrentIndex(3)
         window.resize(960, 700)
-        capture(window, "dark-compact")
+        capture(window, "dark-telegram-compact")
+        window.settings_tab.theme_choice.setCurrentIndex(0)
+        capture(window, "light-telegram-compact")
         window.close()
         window.runner.pool.waitForDone()
-    print("Saved 13 GUI validation screenshots using temporary data.")
+    print("Saved 16 GUI validation screenshots using temporary data.")
 
 
 if __name__ == "__main__":

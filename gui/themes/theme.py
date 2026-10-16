@@ -95,6 +95,13 @@ class ThemeManager(QObject):
             QTableWidget::item:selected {{ background: {c.selection}; color: {c.selected_text}; }}
             QHeaderView::section {{ background: {c.panel}; color: {c.muted}; border: 0; border-bottom: 1px solid {c.border}; padding: 10px 6px; font-weight: 600; }}
             QPlainTextEdit {{ background: {c.panel}; border: 1px solid {c.border}; border-radius: 5px; padding: 9px; selection-background-color: {c.selection}; selection-color: {c.selected_text}; }}
+            QListWidget {{ background: {c.panel}; border: 1px solid {c.border}; border-radius: 5px; padding: 6px; }}
+            QListWidget::item {{ padding: 4px; }}
+            QScrollArea {{ border: 0; background: {c.window}; }}
+            QCheckBox {{ spacing: 6px; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {c.border}; border-radius: 3px; background: {c.window}; }}
+            QCheckBox::indicator:checked {{ background: {c.primary}; border-color: {c.primary}; }}
+            QCheckBox::indicator:disabled {{ background: {c.disabled}; }}
             QGroupBox {{ border: 1px solid {c.border}; border-radius: 6px; margin-top: 18px; padding: 18px; }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 5px; color: {c.muted}; }}
             QToolTip {{ background: {c.panel}; color: {c.text}; border: 1px solid {c.border}; }}

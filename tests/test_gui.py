@@ -142,7 +142,7 @@ class GuiTests(unittest.TestCase):
         return LicenseRepository(self.db).list_page().total
 
     def test_read_only_startup_without_secrets_or_telegram_import(self):
-        self.assertEqual(self.window.tabs.count(), 4)
+        self.assertEqual(self.window.tabs.count(), 5)
         self.assertFalse(self.window.session.unlocked)
         self.assertFalse(self.window.licenses.issue_button.isEnabled())
         self.assertEqual(self.window.requests.records, [])

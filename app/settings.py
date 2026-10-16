@@ -1,4 +1,4 @@
-"""Only nonsecret desktop preferences; never read bot configuration."""
+"""Allowlisted nonsecret preferences; credentials never enter QSettings."""
 
 from pathlib import Path
 
@@ -20,11 +20,26 @@ class AppSettings:
     def key_path(self):
         return str(self.store.value("key_path", ""))
 
-    def save(self, *, theme=None, key_path=None):
+    @property
+    def bot_admin_id(self):
+        return str(self.store.value("bot_admin_id", ""))
+
+    @property
+    def bot_key_path(self):
+        return str(self.store.value("bot_key_path", ""))
+
+    @property
+    def remember_token(self):
+        return self.store.value("remember_token", False, type=bool)
+
+    def save(self, *, theme=None, key_path=None, bot_admin_id=None, bot_key_path=None, remember_token=None):
         if theme is not None:
             self.store.setValue("theme", "dark" if theme == "dark" else "light")
         if key_path is not None:
             self.store.setValue("key_path", str(key_path))
+        for key, value in (("bot_admin_id", bot_admin_id), ("bot_key_path", bot_key_path), ("remember_token", remember_token)):
+            if value is not None:
+                self.store.setValue(key, value)
         self.store.sync()
         if self.store.status() != QSettings.Status.NoError:
             raise OSError("Unable to save desktop preferences.")

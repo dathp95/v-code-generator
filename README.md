@@ -158,8 +158,8 @@ python main.py
 
 No Telegram token or private key is needed to open the desktop. Importing the GUI
 does not import bot configuration or start polling. `generate_activation.py` and
-`telegram_bot.py` remain separately runnable; this version has no bot Start/Stop
-controls.
+`telegram_bot.py` remain separately runnable. The **Telegram Bot** tab can also
+run and stop a managed bot without a separate terminal.
 
 The desktop uses the same repository-relative `data/license_manager.sqlite3` and
 `LICENSE_DB_PATH` resolution as the CLI/bot. Set the environment override before
@@ -168,6 +168,63 @@ load `.env`: if the bot gets its DB override from `.env`, set that same path in
 the desktop's environment explicitly. Use Settings to verify the active path.
 All processes must share a local SQLite file with appropriate permissions. Existing
 schema migrations are reused without a new migration or token-format changes.
+
+### Connect Telegram from the desktop
+
+Install `requirements-gui.txt` for the combined GUI/Telegram dependency set
+(Python 3.12 recommended, python-telegram-bot 22.8, keyring 25.7.0).
+In **Telegram Bot**, enter the Bot Token, positive numeric Admin User ID,
+absolute encrypted RSA key path and key password, then choose **Connect**.
+The official Telegram Bot API endpoint is fixed; API ID/API Hash are not used.
+The displayed database is the exact path passed to the child, independent of cwd.
+Connected appears only after key/config validation, Telegram initialization and
+polling startup, with the verified bot name/username. No real connection is
+attempted simply by opening the desktop or browsing records.
+
+The desktop starts one child with its current `sys.executable` using `QProcess`.
+Startup secrets go through version-1 stdin JSON, never argv, files or ordinary
+settings. stdout carries allowlisted status/record events, never raw updates,
+keys or exception text; stderr and library logging are suppressed in managed mode.
+Nonsecret Admin ID/key path/Remember preference use the existing INI settings.
+**Remember Token** explicitly opts into Windows Credential Manager via keyring's
+Windows vault backend, with no plaintext fallback. If unavailable or failing,
+Remember is disabled with an explanation and connection remains session-only.
+If a vault update/delete fails, an older entry may remain; remove it from Windows
+Credential Manager if needed (service `V-CODE License Manager Telegram`).
+Unchecking Remember and connecting removes the saved vault entry when available.
+Key passwords are never persisted and their input is cleared at handoff. A token
+stays masked in the current desktop session for editing/reconnection.
+
+Credentials are frozen while the child is active. Choose **Disconnect**, wait
+for Disconnected, edit, then Connect. Desktop signing and bot signing are separate:
+Settings **Lock signing** only locks desktop manual issuance. Disconnect the bot
+to release its signing session. Closing the desktop requests graceful polling
+shutdown and waits for active desktop operations. After 15 seconds of stalled
+shutdown, **Force stop** is available only with an explicit unknown-outcome warning
+and confirmation; it may leave delivery claims awaiting lease recovery.
+
+Only one poller may use a bot token. A Telegram **Conflict** is fatal and visible;
+stop the other desktop/standalone instance before connecting again. DNS/network
+failures report Reconnecting using safe summaries; initial network attempts wait
+with a cancellable five-second backoff. This is connectivity recovery only: no
+license is automatically reissued or resent. Unexpected exits report Error.
+Use the existing admin confirmation/manual retry flow for delivery recovery.
+Timeouts/crashes/forced stops can leave unknown outcomes and duplicate Telegram
+messages remain possible. All existing leases, fencing and RetryAfter cooldowns
+still apply. Issued, Telegram acknowledged, and V-CODE activated remain distinct.
+
+Child workflow events trigger debounced worker-based record refreshes; filters
+and selection are retained. Reconnection and a 15-second reconciliation check
+refresh SQLite as the source of truth if events were missed. Activity retains
+only the newest 100 timestamped safe summaries. GUI approval/resend controls are
+not part of this version; admins continue approving and retrying inside Telegram.
+
+`python telegram_bot.py` still loads the standalone environment/ignored `.env`
+configuration as before. Managed mode never imports or rewrites `.env`. Disconnect
+one mode before starting the other with the same token. New implementation lives
+in `integrations/telegram/` (shared navigation/workflow handlers, keyboards,
+application registration and managed entry), `app/bot_controller.py`,
+`app/credentials.py` and `gui/tabs/telegram_bot_tab.py`.
 
 - **Requests** is read-only, with customer/Device ID/request ID search, status
   filtering, 25-row pages, sortable columns, and selected-request details. Approval

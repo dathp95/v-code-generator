@@ -5,6 +5,8 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QMainWindow, QTabWidget, QVBo
 
 from app.settings import AppSettings
 from app.signing import SigningSession
+from app.bot_controller import BotController
+from gui.tabs.telegram_bot_tab import TelegramBotTab
 from gui.tabs.deliveries_tab import DeliveriesTab
 from gui.tabs.licenses_tab import LicensesTab
 from gui.tabs.requests_tab import RequestsTab
@@ -25,6 +27,7 @@ class MainWindow(QMainWindow):
         self.settings = settings or AppSettings()
         self.runner = TaskRunner(self)
         self.session = SigningSession(self.database, self.runner, self)
+        self.bot = BotController(self.database, self)
         self.theme = ThemeManager(self.settings.theme, self)
         self._closing = False
         self._initializing = False
@@ -43,7 +46,7 @@ class MainWindow(QMainWindow):
         subtitle.setProperty("role", "muted")
         titles.addWidget(subtitle)
         header.addLayout(titles, 1)
-        self.badge = QLabel("Signing locked")
+        self.badge = QLabel("Desktop signing locked")
         self.badge.setProperty("role", "badge")
         header.addWidget(self.badge)
         self.refresh_button = Button("Refresh all")
@@ -59,7 +62,8 @@ class MainWindow(QMainWindow):
         self.licenses = LicensesTab(LicenseRepository(self.database), self.runner, self.theme, self.session)
         self.deliveries = DeliveriesTab(DeliveryRepository(self.database), self.runner, self.theme)
         self.settings_tab = SettingsTab(self.database, self.settings, self.theme, self.session)
-        for tab, title in ((self.requests, "Requests"), (self.licenses, "Licenses"), (self.deliveries, "Delivery History"), (self.settings_tab, "Settings")):
+        self.telegram_tab = TelegramBotTab(self.database, self.settings, self.bot)
+        for tab, title in ((self.requests, "Requests"), (self.licenses, "Licenses"), (self.deliveries, "Delivery History"), (self.telegram_tab, "Telegram Bot"), (self.settings_tab, "Settings")):
             self.tabs.addTab(tab, title)
         layout.addWidget(self.tabs, 1)
         footer = QLabel("Issued ≠ sent ≠ activated  •  Request approval and retries remain in Telegram")
@@ -69,10 +73,20 @@ class MainWindow(QMainWindow):
         self.theme.apply(self.settings.theme)
         self.session.changed.connect(self._signing_changed)
         self.runner.idle.connect(self._idle)
+        self.bot.stopped.connect(self._idle)
+        self.bot_refresh = QTimer(self)
+        self.bot_refresh.setSingleShot(True)
+        self.bot_refresh.setInterval(350)
+        self.bot_refresh.timeout.connect(self._refresh_bot_records)
+        self.bot.records_changed.connect(lambda: self.bot_refresh.start())
+        self.reconcile = QTimer(self)
+        self.reconcile.setInterval(15000)
+        self.reconcile.timeout.connect(lambda: self.bot_refresh.start() if self.bot.active else None)
+        self.reconcile.start()
         QTimer.singleShot(0, self.refresh_all)
 
     def _signing_changed(self):
-        self.badge.setText("Signing busy" if self.session.issuing else "Unlocking…" if self.session.unlocking else "Signing unlocked" if self.session.unlocked else "Signing locked")
+        self.badge.setText("Desktop signing busy" if self.session.issuing else "Desktop unlocking…" if self.session.unlocking else "Desktop signing unlocked" if self.session.unlocked else "Desktop signing locked")
 
     def refresh_all(self):
         if self._initializing or self._closing:
@@ -107,6 +121,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.session.lock()
+        if self.bot.active:
+            self._closing = True
+            self.bot.disconnect_bot()
+            self.tabs.setCurrentWidget(self.telegram_tab)
+            self.error.setText("Stopping managed bot before closing…")
+            event.ignore()
+            return
         if self.runner.busy:
             self._closing = True
             self.runner.accepting = False
@@ -119,3 +140,12 @@ class MainWindow(QMainWindow):
     def _idle(self):
         if self._closing:
             QTimer.singleShot(0, self.close)
+
+    def _refresh_bot_records(self):
+        if self._closing:
+            return
+        if self.runner.busy or self._initializing:
+            self.bot_refresh.start()
+            return
+        for tab in (self.requests, self.licenses, self.deliveries):
+            tab.refresh()
