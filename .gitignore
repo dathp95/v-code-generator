@@ -10,6 +10,13 @@ activation.dat
 activation-*.json
 activation-*.txt
 *.lic
+data/
+*.sqlite
+*.sqlite3
+*.db
+*-journal
+*-wal
+*-shm
 
 # Python
 .venv/

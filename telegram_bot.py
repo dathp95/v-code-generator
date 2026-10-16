@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,14 +12,106 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.error import TelegramError
-from uuid import uuid4
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
 
 from datetime import datetime
 
 from core.crypto.activation import validate_device_id
 from core.crypto.key_loader import load_private_key
 from core.services.license_service import LicenseService
+from services.issuance_service import IssuanceService, RequestUnavailable, require_unexpired
+from storage.database import Database, StorageError
+from storage.repositories.delivery_repository import DeliveryRepository
+from storage.repositories.license_repository import LicenseRepository
+from storage.repositories.request_repository import RequestRepository
+
+
+STORAGE_FAILURE = "Không lưu được dữ liệu. Chưa xác nhận gửi key; kiểm tra DB trước khi thử lại."
+MISSING_REQUEST = "Không tìm thấy yêu cầu đã lưu (yêu cầu RAM cũ không thể khôi phục). Hãy nhờ khách gửi lại Device ID."
+
+
+async def handle_error(update, context):
+    # PTB's default error handler logs the update and raw exception. Neither is safe here.
+    if isinstance(context.error, TelegramError):
+        category = delivery_error(context.error)[1]
+    elif isinstance(context.error, StorageError):
+        category = "storage"
+    else:
+        category = "unexpected"
+    logging.getLogger(__name__).warning("Telegram update failed (%s).", category)
+
+
+def configure_storage(bot_data, license_service, database):
+    database.initialize()
+    bot_data["license_service"] = license_service
+    bot_data["request_repository"] = RequestRepository(database)
+    bot_data["license_repository"] = LicenseRepository(database)
+    bot_data["delivery_repository"] = DeliveryRepository(database)
+    bot_data["issuance_service"] = IssuanceService(license_service, database)
+
+
+def delivery_error(error):
+    """Only fixed categories enter storage; never retain exception text."""
+    if isinstance(error, TimedOut):
+        return "retryable_failed", "timeout"
+    if isinstance(error, RetryAfter):
+        return "retryable_failed", "rate_limited"
+    if isinstance(error, Forbidden):
+        return "permanent_failed", "forbidden"
+    if isinstance(error, BadRequest):
+        return "permanent_failed", "bad_request"
+    if isinstance(error, NetworkError):
+        return "retryable_failed", "network"
+    return "permanent_failed", "telegram"
+
+
+async def recorded_send(deliveries, *, destination, purpose, send, request_id=None, license_id=None):
+    # start() commits before the network await; finish() uses a separate transaction.
+    attempt = deliveries.start(
+        destination=destination, purpose=purpose, request_id=request_id, license_id=license_id,
+    )
+    try:
+        sent = await send()
+    except TelegramError as error:
+        status, category = delivery_error(error)
+        deliveries.finish(attempt, status=status, error_category=category)
+        return status
+    deliveries.finish(attempt, status="succeeded", message_id=getattr(sent, "message_id", None))
+    return "succeeded"
+
+
+def license_summary(record, label="Machine ID"):
+    payload = record["payload"]
+    expires_local = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")).astimezone()
+    return (
+        f"{label}: {payload['device_id']}\n"
+        f"Edition: {payload['edition']}\n"
+        f"Duration: {record['duration_days']} ngày\n"
+        f"Expires: {expires_local:%d/%m/%Y %H:%M:%S %z}"
+    )
+
+
+async def deliver_manual(record, update, context):
+    require_unexpired(record)
+    data = context.application.bot_data
+    deliveries = data["delivery_repository"]
+    async def send():
+        await update.effective_message.reply_text(
+            f"{license_summary(record, 'Device ID')}\nLicense ID: {record['license_id']}"
+        )
+        return await update.effective_message.reply_text(record["activation_key"])
+
+    status = await recorded_send(
+        deliveries, destination=update.effective_chat.id, purpose="manual_license",
+        license_id=record["license_id"],
+        send=send,
+    )
+    if status != "succeeded":
+        detail = "Lỗi mạng/tạm thời." if status == "retryable_failed" else "Kiểm tra quyền gửi/chat trước khi thử lại."
+        await update.effective_message.reply_text(
+            f"Chưa gửi được key. {detail} Dùng /retry {record['license_id']} để gửi cùng key."
+        )
+    return status
 
 
 def build_menu(is_admin=False):
@@ -200,66 +293,54 @@ async def myid(
         f"Telegram User ID: {update.effective_user.id}"
     )
 
-async def generate(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    ):
-        message = update.effective_message
-        user = update.effective_user
-        chat = update.effective_chat
-
-        if message is None or user is None or chat is None:
-            return
-
-        admin_id = context.application.bot_data["admin_id"]
-
-        # Only the administrator can generate keys in a private chat.
-        if user.id != admin_id or chat.type != "private":
-            await message.reply_text("Bạn không có quyền cấp activation key.")
-            return
-        # Hủy luồng nhập Machine ID / Days đang dang dở.
-        context.user_data.pop("key_form", None)
-
-        if len(context.args) != 2:
-            await message.reply_text(
-                "Cách dùng:\n"
-                "/generate DEVICE_ID DAYS\n\n"
-                "Ví dụ:\n"
-                "/generate VC-06CF-43DB-D96E-1BED-B3E0 30"
-            )
-            return
-
-        device_id, days_text = context.args
-
-        try:
-            days = int(days_text)
-            if not 1 <= days <= 3650:
-                raise ValueError("Số ngày phải từ 1 đến 3650.")
-
-            issued = context.application.bot_data["license_service"].issue_activation(
-                device_id=device_id,
-                customer="Test Customer",
-                edition="Professional",
-                days=days,
-            )
-            activation_key, payload = issued.activation_key, issued.payload
-        except ValueError as error:
-            await message.reply_text(f"Không tạo được key: {error}")
-            return
-
-        expires_local = datetime.fromisoformat(
-            payload["expires_at"].replace("Z", "+00:00")
-        ).astimezone()
-
+async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if message is None or user is None or chat is None:
+        return
+    if user.id != context.application.bot_data["admin_id"] or chat.type != "private":
+        await message.reply_text("Bạn không có quyền cấp activation key.")
+        return
+    context.user_data.pop("key_form", None)
+    if len(context.args) != 2:
         await message.reply_text(
-            f"Device ID: {payload['device_id']}\n"
-            f"Edition: {payload['edition']}\n"
-            f"Duration: {days} ngày\n"
-            f"Expires: {expires_local:%d/%m/%Y %H:%M:%S %z}"
+            "Cách dùng:\n/generate DEVICE_ID DAYS\n\n"
+            "Ví dụ:\n/generate VC-06CF-43DB-D96E-1BED-B3E0 30"
         )
+        return
+    device_id, days_text = context.args
+    try:
+        record = context.application.bot_data["issuance_service"].issue_manual(
+            device_id=device_id, customer="Test Customer", edition="Professional",
+            days=int(days_text), issuer=user.id, source="telegram_manual",
+        )
+        await deliver_manual(record, update, context)
+    except StorageError:
+        await message.reply_text(STORAGE_FAILURE)
+    except ValueError:
+        await message.reply_text("Không tạo được key. Kiểm tra Device ID và số ngày từ 1 đến 3650.")
 
-        # Send the key separately for easy copying.
-        await message.reply_text(activation_key)
+
+async def retry_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if message is None or user is None or chat is None:
+        return
+    if user.id != context.application.bot_data["admin_id"] or chat.type != "private":
+        await message.reply_text("Bạn không có quyền cấp activation key.")
+        return
+    if len(context.args) != 1:
+        await message.reply_text("Cách dùng: /retry LICENSE_ID (key tạo thủ công).")
+        return
+    try:
+        record = context.application.bot_data["license_repository"].get(context.args[0])
+        if record is None or record["source"] != "telegram_manual" or record["issuer"] != str(user.id):
+            await message.reply_text("Không tìm thấy key tạo thủ công của Admin.")
+            return
+        await deliver_manual(record, update, context)
+    except StorageError:
+        await message.reply_text(STORAGE_FAILURE)
+    except RequestUnavailable as error:
+        await message.reply_text(str(error))
+
 
 async def cancel_form(
     update: Update,
@@ -308,43 +389,41 @@ async def receive_form(
             else "Không có username"
         )
         
-        request_id = uuid4().hex
-        requests = context.application.bot_data.setdefault(
-            "activation_requests", {}
-        )
-        requests[request_id] = {
-            "chat_id": chat.id,
-            "device_id": device_id,
-            "customer": user.full_name,
-            "status": "pending",
-        }
-
+        data = context.application.bot_data
         try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=(
-                    "📩 YÊU CẦU KÍCH HOẠT V-CODE\n\n"
-                    f"Khách: {user.full_name}\n"
-                    f"Username: {username}\n"
-                    f"Telegram User ID: {user.id}\n"
-                    f"Machine ID: {device_id}\n\n"
-                    "Chọn Tạo key — Admin để cấp license."
-                ),
-                parse_mode=None,
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "🔑 Tạo key — Admin",
-                            callback_data=f"request:{request_id}",
-                        )
-                    ]
-                ]),
+            request = data["request_repository"].create_or_get_pending(
+                channel="telegram", recipient_id=chat.id, user_id=user.id,
+                customer=user.full_name, device_id=device_id,
             )
-        except TelegramError:
-            await message.reply_text(
-                "⚠️ Chưa gửi được yêu cầu tới Admin.\n"
-                "Vui lòng thử lại sau hoặc liên hệ hỗ trợ."
-            )
+            request_id = request["request_id"]
+            deliveries = data["delivery_repository"]
+            if not deliveries.succeeded(request_id=request_id, purpose="admin_notification"):
+                status = await recorded_send(
+                    deliveries, destination=admin_id, purpose="admin_notification", request_id=request_id,
+                    send=lambda: context.bot.send_message(
+                        chat_id=admin_id,
+                        text=(
+                            "📩 YÊU CẦU KÍCH HOẠT V-CODE\n\n"
+                            f"Khách: {request['customer']}\n"
+                            f"Username: {username}\n"
+                            f"Telegram User ID: {user.id}\n"
+                            f"Machine ID: {device_id}\n\n"
+                            "Chọn Tạo key — Admin để cấp license."
+                        ),
+                        parse_mode=None,
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔑 Tạo key — Admin", callback_data=f"request:{request_id}")
+                        ]]),
+                    ),
+                )
+                if status != "succeeded":
+                    await message.reply_text(
+                        "⚠️ Chưa gửi được yêu cầu tới Admin.\n"
+                        "Yêu cầu đã lưu. Gửi lại Device ID để thử thông báo lại; không tạo yêu cầu trùng."
+                    )
+                    return
+        except StorageError:
+            await message.reply_text(STORAGE_FAILURE)
             return
 
         await message.reply_text(
@@ -404,109 +483,78 @@ async def receive_form(
         return
 
     request_id = form.get("request_id")
-    request = None
-
-    if request_id:
-        request = context.application.bot_data.get(
-            "activation_requests", {}
-        ).get(request_id)
-
-        if request is None or request["status"] == "sent":
+    data = context.application.bot_data
+    try:
+        if request_id:
+            request = data["request_repository"].get(request_id)
+            if request is None:
+                context.user_data.pop("key_form", None)
+                await message.reply_text(MISSING_REQUEST)
+                return
+            record = data["issuance_service"].approve_request(request_id, days=days, issuer=user.id)
+            deliveries = data["delivery_repository"]
+            if deliveries.succeeded(
+                request_id=request_id, license_id=record["license_id"], purpose="customer_license",
+            ):
+                context.user_data.pop("key_form", None)
+                await message.reply_text("Key đã được gửi cho yêu cầu này.")
+                return
+            summary = license_summary(record)
+            status = await recorded_send(
+                deliveries, destination=request["recipient_id"], purpose="customer_license",
+                request_id=request_id, license_id=record["license_id"],
+                send=lambda: context.bot.send_message(
+                    chat_id=int(request["recipient_id"]),
+                    text=(
+                        "✅ License V-CODE của bạn đã được cấp!\n\n"
+                        f"{summary}\n\nActivation Key:\n{record['activation_key']}\n\n"
+                        "Copy toàn bộ chuỗi key ở trên.\n"
+                        "Mở V-CODE → License Support → dán vào Activation Key → Activate."
+                    ),
+                    parse_mode=None,
+                ),
+            )
+            if status != "succeeded":
+                detail = (
+                    "Lỗi mạng/tạm thời."
+                    if status == "retryable_failed"
+                    else "Lỗi gửi cố định; kiểm tra khách chặn bot hoặc chat không hợp lệ trước khi thử lại."
+                )
+                await message.reply_text(
+                    f"⚠️ Đã lưu key nhưng chưa xác nhận gửi thành công. {detail}\n"
+                    f"Nhập lại {days} để thử gửi cùng key; sau khởi động lại, chọn lại nút yêu cầu."
+                )
+                return
             context.user_data.pop("key_form", None)
             await message.reply_text(
-                "Yêu cầu không còn hợp lệ hoặc đã được gửi key."
+                f"✅ Đã gửi key cho {request['customer']}.\n\n{summary}",
+                reply_markup=build_menu(is_admin=True),
             )
             return
 
-    # Nếu lần gửi trước lỗi, dùng lại key đã tạo.
-    if request is not None and "activation_key" in request:
-        if days != request["days"]:
-            await message.reply_text(
-                f"Key đã tạo với {request['days']} ngày.\n"
-                "Nhập lại đúng số ngày đó để thử gửi lại."
+        # Manual issuance is recorded too; a form retry retains the persisted license ID.
+        record = data["license_repository"].get(form["license_id"]) if form.get("license_id") else None
+        if form.get("license_id") and record is None:
+            raise RequestUnavailable("Không tìm thấy key đã lưu. Kiểm tra DB trước khi tạo key mới.")
+        if record is None:
+            record = data["issuance_service"].issue_manual(
+                device_id=form["device_id"], customer="Test Customer", edition="Professional",
+                days=days, issuer=user.id, source="telegram_manual",
             )
+            form["license_id"] = record["license_id"]
+        elif days != record["duration_days"]:
+            await message.reply_text(f"Nhập lại {record['duration_days']} ngày để gửi cùng key.")
             return
+        if await deliver_manual(record, update, context) == "succeeded":
+            context.user_data.pop("key_form", None)
+            await message.reply_text("Chọn chức năng tiếp theo:", reply_markup=build_menu(is_admin=True))
+    except StorageError:
+        await message.reply_text(STORAGE_FAILURE)
+    except RequestUnavailable as error:
+        await message.reply_text(str(error))
+    except ValueError:
+        await message.reply_text("Không tạo được key. Kiểm tra Device ID và số ngày từ 1 đến 3650.")
 
-        activation_key = request["activation_key"]
-        payload = request["payload"]
-    else:
-        try:
-            issued = context.application.bot_data["license_service"].issue_activation(
-                device_id=form["device_id"],
-                customer=(
-                    request["customer"]
-                    if request is not None
-                    else "Test Customer"
-                ),
-                edition="Professional",
-                days=days,
-            )
-            activation_key, payload = issued.activation_key, issued.payload
-        except ValueError as error:
-            await message.reply_text(f"Không tạo được key: {error}")
-            return
-
-        if request is not None:
-            request["activation_key"] = activation_key
-            request["payload"] = payload
-            request["days"] = days
-
-    expires_local = datetime.fromisoformat(
-        payload["expires_at"].replace("Z", "+00:00")
-    ).astimezone()
-
-    summary = (
-        f"Machine ID: {payload['device_id']}\n"
-        f"Edition: {payload['edition']}\n"
-        f"Duration: {days} ngày\n"
-        f"Expires: {expires_local:%d/%m/%Y %H:%M:%S %z}"
-    )
-
-    # Tạo từ yêu cầu khách: gửi key tới đúng chat đã lưu.
-    if request is not None:
-        try:
-            await context.bot.send_message(
-                chat_id=request["chat_id"],
-                text=(
-                    "✅ License V-CODE của bạn đã được cấp!\n\n"
-                    f"{summary}\n\n"
-                    "Activation Key:\n"
-                    f"{activation_key}\n\n"
-                    "Copy toàn bộ chuỗi key ở trên.\n"
-                    "Mở V-CODE → License Support → "
-                    "dán vào Activation Key → Activate."
-                ),
-                parse_mode=None,
-            )
-        except TelegramError:
-            await message.reply_text(
-                "⚠️ Đã tạo key nhưng chưa xác nhận gửi thành công.\n"
-                f"Nhập lại {days} để thử gửi cùng key.\n"
-                "Nếu khách chặn bot, hãy nhờ khách bỏ chặn."
-            )
-            return
-
-        request["status"] = "sent"
-        context.user_data.pop("key_form", None)
-
-        await message.reply_text(
-            f"✅ Đã gửi key cho {request['customer']}.\n\n"
-            f"{summary}",
-            reply_markup=build_menu(is_admin=True),
-        )
-        return
-
-    # Tạo thủ công từ menu: trả key cho Admin.
-    context.user_data.pop("key_form", None)
-
-    await message.reply_text(
-        f"✅ Đã tạo activation key\n\n{summary}"
-    )
-    await message.reply_text(activation_key)
-    await message.reply_text(
-        "Chọn chức năng tiếp theo:",
-        reply_markup=build_menu(is_admin=True),
-    )
 
 async def select_request(
     update: Update,
@@ -529,22 +577,28 @@ async def select_request(
         return
 
     request_id = (query.data or "").split(":", 1)[-1]
-    request = context.application.bot_data.get(
-        "activation_requests", {}
-    ).get(request_id)
-
-    if request is None:
-        await query.answer(
-            "Yêu cầu không còn trong bộ nhớ. Hãy nhờ khách gửi lại ID.",
-            show_alert=True,
-        )
+    data = context.application.bot_data
+    try:
+        request = data["request_repository"].get(request_id)
+        if request is None:
+            await query.answer(MISSING_REQUEST, show_alert=True)
+            return
+        record = data["license_repository"].for_request(request_id)
+        if request["status"] == "closed":
+            await query.answer("Yêu cầu đã đóng. Hãy nhờ khách gửi lại Device ID.", show_alert=True)
+            return
+        if record is not None:
+            require_unexpired(record)
+            if data["delivery_repository"].succeeded(
+                request_id=request_id, license_id=record["license_id"], purpose="customer_license",
+            ):
+                await query.answer("Key đã được gửi cho yêu cầu này.", show_alert=True)
+                return
+    except StorageError:
+        await query.answer(STORAGE_FAILURE, show_alert=True)
         return
-
-    if request["status"] == "sent":
-        await query.answer(
-            "Key đã được gửi cho yêu cầu này.",
-            show_alert=True,
-        )
+    except RequestUnavailable as error:
+        await query.answer(str(error), show_alert=True)
         return
 
     await query.answer()
@@ -599,11 +653,16 @@ def main():
     app = Application.builder().token(token).build()
 
     app.bot_data["admin_id"] = admin_id
-    app.bot_data["license_service"] = LicenseService(private_key)
+    try:
+        configure_storage(app.bot_data, LicenseService(private_key), Database())
+    except StorageError:
+        raise SystemExit("Không mở được DB license. Kiểm tra đường dẫn và quyền truy cập.") from None
 
+    app.add_error_handler(handle_error)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("generate", generate))
+    app.add_handler(CommandHandler("retry", retry_manual))
     app.add_handler(CommandHandler("menu", start))
     app.add_handler(
         CallbackQueryHandler(menu_click, pattern=r"^menu:")

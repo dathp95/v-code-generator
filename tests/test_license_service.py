@@ -104,6 +104,7 @@ class LicenseServiceTests(unittest.TestCase):
                 patch("sys.argv", args),
                 patch.object(cli.getpass, "getpass", return_value="test-only") as prompt,
                 patch.object(cli, "load_private_key", return_value=self.key) as loader,
+                patch.dict("os.environ", {"LICENSE_DB_PATH": str(Path(directory) / "test.sqlite3")}),
                 redirect_stdout(stream),
             ):
                 cli.main()
