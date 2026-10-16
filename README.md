@@ -2,6 +2,9 @@
 
 Admin-only tooling for issuing V-CODE machine-bound Activation Keys.
 
+The local PySide6 desktop provides request/license browsing, delivery history, and
+confirmed manual issuance. CLI and Telegram entry points remain independent.
+
 V-CODE validates Activation Keys in `UDS-Analysis/license/activation.py`. Do not change the token format here unless the V-CODE validator changes in the same way.
 
 ## Security rules
@@ -141,6 +144,93 @@ The CLI and Telegram enforce the same 1–3650-day service boundary. Both record
 manual issuance before displaying or sending a key. Every new CLI invocation or
 `/generate` command is a new manual issuance; use the stored license for recovery
 rather than repeating an issuance command after uncertain output.
+
+## Launch the desktop
+
+Use Python 3.11 or later; the desktop dependency set in `requirements-gui.txt`
+was tested with Python 3.12.10, PySide6 6.8.3, cryptography 49.0.0, and SQLite
+3.49.1 with JSON support. From this repository, install and launch:
+
+```powershell
+python -m pip install -r requirements-gui.txt
+python main.py
+```
+
+No Telegram token or private key is needed to open the desktop. Importing the GUI
+does not import bot configuration or start polling. `generate_activation.py` and
+`telegram_bot.py` remain separately runnable; this version has no bot Start/Stop
+controls.
+
+The desktop uses the same repository-relative `data/license_manager.sqlite3` and
+`LICENSE_DB_PATH` resolution as the CLI/bot. Set the environment override before
+launching each process if you use another DB. The desktop deliberately does not
+load `.env`: if the bot gets its DB override from `.env`, set that same path in
+the desktop's environment explicitly. Use Settings to verify the active path.
+All processes must share a local SQLite file with appropriate permissions. Existing
+schema migrations are reused without a new migration or token-format changes.
+
+- **Requests** is read-only, with customer/Device ID/request ID search, status
+  filtering, 25-row pages, sortable columns, and selected-request details. Approval
+  and rejection remain in Telegram. Rejected requests are distinguished from
+  other closed requests.
+- **Licenses** shows metadata and linked requests, never full tokens in cells or
+  details. Select a license and explicitly use **Copy Key** to read it into the
+  clipboard, even while signing is locked. **Issue manually** opens a form for
+  customer, Device ID, edition, and 1–3650 days. Choose **Review**, then **Confirm
+  issuance**. Cancel/close before confirmation creates nothing. A confirmed action
+  saves through `IssuanceService` with source `desktop_manual` and issuer
+  `local_admin` before enabling Copy Key. Repeated clicks do not issue again. No
+  Telegram delivery or delivery-history attempt is created by desktop issuance.
+- **Delivery History** is read-only. Unknown outcomes are highlighted and labeled
+  for admin review; the desktop cannot resend. Sent means Telegram acknowledged
+  delivery, not that V-CODE was activated. History shows stored attempt/lease
+  states; lease recovery and retry decisions remain in the bot.
+- **Settings** shows the database path and system display timezone, and saves
+  Light/Dark preferences in the ignored `data/desktop.ini`. Shared palette/control
+  styles were adapted from the read-only
+  [UDS-Analysis themes](https://github.com/dathp95/UDS-Analysis/tree/main/gui/themes)
+  and [controls](https://github.com/dathp95/UDS-Analysis/tree/main/gui/widgets/controls)
+  reference. There is no dependency on another checkout.
+
+In Settings, choose an encrypted RSA private-key file, type its password in the
+masked field, and explicitly choose **Unlock signing**. The password field is
+cleared immediately; passwords/private-key contents are never saved. Only the
+nonsecret file path may be remembered. The key stays in memory until **Lock
+signing** or exit. Lock disables new issuance and invalidates any pending unlock;
+a confirmed signing task already running finishes safely before shutdown. This
+is reference release, not a guarantee of cryptographic memory erasure. Existing
+tokens copied to the system clipboard remain there until replaced or cleared.
+
+DB queries, key loading, and signing run in a bounded worker pool, with separate
+SQLite connections and queued Qt signals for UI updates. Closing waits for active
+operations; it does not terminate signing. **Refresh** reloads the current view
+and preserves the selected ID when it remains on the page. **Refresh all** also
+retries database initialization after a storage error. UTC stays in storage;
+timestamps are converted to the system timezone for display, with timezone labels.
+
+Desktop validation with temporary databases/keys and no messages:
+
+```powershell
+python -m unittest discover -s tests -v
+python tests/preview_gui.py --output output/gui-validation
+```
+
+GUI tests are skipped if PySide6 is not installed; install `requirements-gui.txt`
+to run them. The preview harness creates isolated data and captures Light/Dark
+tabs, review/error dialogs, and a compact layout. It defaults to Qt's offscreen
+platform; on Windows it registers installed fonts if offscreen font discovery is
+unavailable. To use the native Windows renderer:
+
+```powershell
+$env:QT_QPA_PLATFORM = "windows"
+python tests/preview_gui.py --output output/gui-validation-native
+Remove-Item Env:QT_QPA_PLATFORM
+```
+
+Current desktop limits: no request approval/rejection, resending, automatic retry,
+activation reporting, exports, remote mode, or production packaging. Refresh is
+manual; there is no live database watcher. No production data is needed for tests
+or preview capture.
 
 ## SQLite configuration and state
 

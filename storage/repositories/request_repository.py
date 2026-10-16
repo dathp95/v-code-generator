@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from core.crypto.activation import validate_device_id, validate_non_empty
 from storage.database import Database
+from storage.repositories.pagination import query_page, search_pattern
 
 
 class RequestRepository:
@@ -18,6 +19,26 @@ class RequestRepository:
                 return self.get(request_id, connection=connection)
         row = connection.execute("SELECT * FROM requests WHERE request_id = ?", (request_id,)).fetchone()
         return dict(row) if row else None
+
+    def list_page(self, *, search="", status="all", page=0, size=25, sort="created_at", descending=True):
+        if status not in ("all", "pending", "approved", "closed", "rejected"):
+            raise ValueError("Unsupported request status.")
+        select = """SELECT r.*,
+            CASE WHEN r.rejected_by IS NOT NULL THEN 'rejected' ELSE r.status END AS request_status,
+            (SELECT d.status FROM deliveries d WHERE d.request_id = r.request_id
+             AND d.purpose = 'customer_license' ORDER BY d.delivery_id DESC LIMIT 1) AS delivery_status
+            FROM requests r"""
+        where = "(r.customer LIKE ? ESCAPE '\\' OR r.device_id LIKE ? ESCAPE '\\' OR r.request_id LIKE ? ESCAPE '\\')"
+        pattern = search_pattern(search)
+        parameters = [pattern, pattern, pattern]
+        if status != "all":
+            where += " AND (CASE WHEN r.rejected_by IS NOT NULL THEN 'rejected' ELSE r.status END) = ?"
+            parameters.append(status)
+        sorts = {name: "r." + name for name in ("request_id", "customer", "channel", "device_id", "created_at")}
+        sorts.update(request_status="request_status", delivery_status="delivery_status")
+        with self.database.connection() as connection:
+            return query_page(connection, select, where, parameters, sorts=sorts, sort=sort,
+                              descending=descending, page=page, size=size)
 
     def create_or_get_pending(self, *, channel, recipient_id, user_id, customer, device_id):
         device_id = validate_device_id(device_id)

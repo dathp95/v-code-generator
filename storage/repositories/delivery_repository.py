@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 
 from storage.database import Database
+from storage.repositories.pagination import query_page, search_pattern
 
 
 LEASE_SECONDS = 120
@@ -34,6 +35,14 @@ def delivery_version(row):
 class DeliveryRepository:
     def __init__(self, database: Database):
         self.database = database
+
+    def list_page(self, *, search="", page=0, size=25, sort="delivery_id", descending=True):
+        where = "(coalesce(request_id, '') LIKE ? ESCAPE '\\' OR coalesce(license_id, '') LIKE ? ESCAPE '\\' OR destination LIKE ? ESCAPE '\\')"
+        pattern = search_pattern(search)
+        sorts = {name: name for name in ("delivery_id", "purpose", "request_id", "license_id", "attempt_number", "destination", "status", "started_at", "finished_at", "error_category")}
+        with self.database.connection() as connection:
+            return query_page(connection, "SELECT * FROM deliveries", where, [pattern] * 3,
+                              sorts=sorts, sort=sort, descending=descending, page=page, size=size)
 
     def recover_stale(self, *, connection=None):
         if connection is None:

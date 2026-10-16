@@ -4,6 +4,12 @@ import json
 
 from core.crypto.activation import canonical_payload_bytes
 from storage.database import Database
+from storage.repositories.pagination import query_page, search_pattern
+
+
+SUMMARY_SELECT = """SELECT license_id, request_id, edition, duration_days, issued_at, expires_at, issuer, source,
+    json_extract(payload_json, '$.customer') AS customer,
+    json_extract(payload_json, '$.device_id') AS device_id FROM licenses"""
 
 
 class LicenseRepository:
@@ -17,6 +23,19 @@ class LicenseRepository:
         record = dict(row)
         record["payload"] = json.loads(record["payload_json"])
         return record
+
+    def list_page(self, *, search="", page=0, size=25, sort="issued_at", descending=True):
+        where = "(json_extract(payload_json, '$.customer') LIKE ? ESCAPE '\\' OR json_extract(payload_json, '$.device_id') LIKE ? ESCAPE '\\' OR license_id LIKE ? ESCAPE '\\' OR coalesce(request_id, '') LIKE ? ESCAPE '\\')"
+        pattern = search_pattern(search)
+        sorts = {name: name for name in ("license_id", "customer", "device_id", "edition", "issued_at", "expires_at", "source", "request_id")}
+        with self.database.connection() as connection:
+            return query_page(connection, SUMMARY_SELECT, where, [pattern] * 4, sorts=sorts, sort=sort,
+                              descending=descending, page=page, size=size)
+
+    def get_details(self, license_id):
+        with self.database.connection() as connection:
+            row = connection.execute(SUMMARY_SELECT + " WHERE license_id = ?", (license_id,)).fetchone()
+            return dict(row) if row else None
 
     def get(self, license_id, *, connection=None):
         if connection is None:
