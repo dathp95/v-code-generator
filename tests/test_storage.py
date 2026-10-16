@@ -54,7 +54,7 @@ class StorageTests(unittest.TestCase):
         for field in ("created_at", "updated_at"):
             self.assertEqual(datetime.fromisoformat(request[field]).utcoffset(), timedelta(0))
         with reopened.connection() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         with self.assertRaises(StorageError):
             self.deliveries.start(destination=1, purpose="customer_license", license_id="missing")

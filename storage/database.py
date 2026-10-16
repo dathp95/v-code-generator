@@ -20,10 +20,17 @@ def utc_now() -> str:
 
 
 class Database:
-    def __init__(self, path: Path | str | None = None):
+    def __init__(self, path: Path | str | None = None, *, clock=None):
         configured = path if path is not None else os.getenv("LICENSE_DB_PATH", "").strip()
         selected = Path(configured).expanduser() if configured else DEFAULT_DB_PATH
         self.path = selected if selected.is_absolute() else REPOSITORY_ROOT / selected
+        self.clock = clock or (lambda: datetime.now(UTC))
+
+    def now(self):
+        return self.clock().astimezone(UTC)
+
+    def timestamp(self):
+        return self.now().isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     @contextmanager
     def connection(self, *, write=False):
@@ -59,10 +66,12 @@ class Database:
             raise StorageError("Unable to initialize license storage.") from None
         with self.transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise StorageError("Database schema is newer than this application supports.")
-            if version < 1:
-                migration = Path(__file__).parent / "migrations" / "001_initial.sql"
+            for target, name in ((1, "001_initial.sql"), (2, "002_reliable_workflow.sql")):
+                if version >= target:
+                    continue
+                migration = Path(__file__).parent / "migrations" / name
                 # execute(), unlike executescript(), preserves our explicit transaction.
                 for statement in migration.read_text(encoding="utf-8").split(";"):
                     if statement.strip():

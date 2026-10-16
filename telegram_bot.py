@@ -12,16 +12,18 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
+from telegram.error import TelegramError
 
 from datetime import datetime
 
 from core.crypto.activation import validate_device_id
 from core.crypto.key_loader import load_private_key
 from core.services.license_service import LicenseService
+from services.approval_service import ApprovalService, STALE_FORM
+from services.delivery_service import delivery_error, recorded_send
 from services.issuance_service import IssuanceService, RequestUnavailable, require_unexpired
 from storage.database import Database, StorageError
-from storage.repositories.delivery_repository import DeliveryRepository
+from storage.repositories.delivery_repository import DeliveryBlocked, DeliveryRepository
 from storage.repositories.license_repository import LicenseRepository
 from storage.repositories.request_repository import RequestRepository
 
@@ -48,36 +50,28 @@ def configure_storage(bot_data, license_service, database):
     bot_data["license_repository"] = LicenseRepository(database)
     bot_data["delivery_repository"] = DeliveryRepository(database)
     bot_data["issuance_service"] = IssuanceService(license_service, database)
+    bot_data["approval_service"] = ApprovalService(bot_data["issuance_service"])
+    bot_data["delivery_repository"].recover_stale()
 
 
-def delivery_error(error):
-    """Only fixed categories enter storage; never retain exception text."""
-    if isinstance(error, TimedOut):
-        return "retryable_failed", "timeout"
-    if isinstance(error, RetryAfter):
-        return "retryable_failed", "rate_limited"
-    if isinstance(error, Forbidden):
-        return "permanent_failed", "forbidden"
-    if isinstance(error, BadRequest):
-        return "permanent_failed", "bad_request"
-    if isinstance(error, NetworkError):
-        return "retryable_failed", "network"
-    return "permanent_failed", "telegram"
+def blocked_message(error):
+    messages = {
+        "already_succeeded": "Key/thông báo đã gửi thành công; không gửi lại.",
+        "in_progress": "Đang có lượt gửi khác. Chờ kết thúc hoặc hết lease 120 giây rồi kiểm tra /requests.",
+        "unknown": "Kết quả gửi chưa rõ; gửi lại có thể trùng tin. Admin cần xác nhận trong /requests.",
+        "permanent_failed": "Lỗi gửi cố định. Sửa quyền gửi/chat rồi Admin xác nhận thử lại.",
+        "lost_claim": "Lượt gửi đã mất quyền hoàn tất; kết quả chưa rõ. Kiểm tra /requests trước khi thử lại.",
+        "state_changed": "Trạng thái gửi đã thay đổi. Mở /requests, xem lại và xác nhận mới trước khi gửi.",
+        "cooldown": f"Telegram yêu cầu chờ đến {error.retry_at} trước khi thử lại.",
+    }
+    return messages.get(error.code, "Chưa thể gửi. Kiểm tra /requests.")
 
 
-async def recorded_send(deliveries, *, destination, purpose, send, request_id=None, license_id=None):
-    # start() commits before the network await; finish() uses a separate transaction.
-    attempt = deliveries.start(
-        destination=destination, purpose=purpose, request_id=request_id, license_id=license_id,
-    )
-    try:
-        sent = await send()
-    except TelegramError as error:
-        status, category = delivery_error(error)
-        deliveries.finish(attempt, status=status, error_category=category)
-        return status
-    deliveries.finish(attempt, status="succeeded", message_id=getattr(sent, "message_id", None))
-    return "succeeded"
+def invalidate_form(update, context):
+    user, chat = update.effective_user, update.effective_chat
+    if user and chat and user.id == context.application.bot_data["admin_id"]:
+        context.application.bot_data["approval_service"].invalidate(user.id, chat.id)
+    context.user_data.pop("key_form", None)
 
 
 def license_summary(record, label="Machine ID"):
@@ -91,8 +85,8 @@ def license_summary(record, label="Machine ID"):
     )
 
 
-async def deliver_manual(record, update, context):
-    require_unexpired(record)
+async def deliver_manual(record, update, context, *, explicit_retry=False):
+    require_unexpired(record, context.application.bot_data["issuance_service"].database.now())
     data = context.application.bot_data
     deliveries = data["delivery_repository"]
     async def send():
@@ -104,10 +98,13 @@ async def deliver_manual(record, update, context):
     status = await recorded_send(
         deliveries, destination=update.effective_chat.id, purpose="manual_license",
         license_id=record["license_id"],
-        send=send,
+        send=send, explicit_retry=explicit_retry,
     )
     if status != "succeeded":
-        detail = "Lỗi mạng/tạm thời." if status == "retryable_failed" else "Kiểm tra quyền gửi/chat trước khi thử lại."
+        detail = (
+            "Kết quả chưa rõ; gửi lại có thể trùng tin."
+            if status == "unknown" else "Kiểm tra lỗi gửi/chat trước khi thử lại."
+        )
         await update.effective_message.reply_text(
             f"Chưa gửi được key. {detail} Dùng /retry {record['license_id']} để gửi cùng key."
         )
@@ -165,7 +162,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_admin = user.id == context.application.bot_data["admin_id"]
 
-    context.user_data.pop("key_form", None)
+    invalidate_form(update, context)
     
     await message.reply_text(
         "🚗 Chào mừng bạn đến với V-CODE!\n\n"
@@ -206,7 +203,7 @@ async def menu_click(
     await query.answer()
     
     # Selecting any menu item cancels the previous input flow.
-    context.user_data.pop("key_form", None)
+    invalidate_form(update, context)
 
     if query.data == "menu:generate":
         context.user_data["key_form"] = {"step": "device"}
@@ -300,7 +297,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != context.application.bot_data["admin_id"] or chat.type != "private":
         await message.reply_text("Bạn không có quyền cấp activation key.")
         return
-    context.user_data.pop("key_form", None)
+    invalidate_form(update, context)
     if len(context.args) != 2:
         await message.reply_text(
             "Cách dùng:\n/generate DEVICE_ID DAYS\n\n"
@@ -316,6 +313,8 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deliver_manual(record, update, context)
     except StorageError:
         await message.reply_text(STORAGE_FAILURE)
+    except DeliveryBlocked as error:
+        await message.reply_text(blocked_message(error))
     except ValueError:
         await message.reply_text("Không tạo được key. Kiểm tra Device ID và số ngày từ 1 đến 3650.")
 
@@ -327,17 +326,28 @@ async def retry_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != context.application.bot_data["admin_id"] or chat.type != "private":
         await message.reply_text("Bạn không có quyền cấp activation key.")
         return
-    if len(context.args) != 1:
-        await message.reply_text("Cách dùng: /retry LICENSE_ID (key tạo thủ công).")
+    if len(context.args) not in (1, 2) or (len(context.args) == 2 and context.args[1] != "confirm"):
+        await message.reply_text("Cách dùng: /retry LICENSE_ID [confirm] (key tạo thủ công).")
         return
     try:
         record = context.application.bot_data["license_repository"].get(context.args[0])
         if record is None or record["source"] != "telegram_manual" or record["issuer"] != str(user.id):
             await message.reply_text("Không tìm thấy key tạo thủ công của Admin.")
             return
-        await deliver_manual(record, update, context)
+        latest = context.application.bot_data["delivery_repository"].latest(
+            license_id=record["license_id"], purpose="manual_license",
+        )
+        if latest and latest["status"] in ("unknown", "permanent_failed") and len(context.args) == 1:
+            await message.reply_text(
+                "Kết quả chưa rõ hoặc lỗi cố định. Sửa lỗi trước; gửi lại có thể trùng tin.\n"
+                f"Xác nhận thủ công: /retry {record['license_id']} confirm"
+            )
+            return
+        await deliver_manual(record, update, context, explicit_retry=len(context.args) == 2)
     except StorageError:
         await message.reply_text(STORAGE_FAILURE)
+    except DeliveryBlocked as error:
+        await message.reply_text(blocked_message(error))
     except RequestUnavailable as error:
         await message.reply_text(str(error))
 
@@ -346,7 +356,7 @@ async def cancel_form(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    context.user_data.pop("key_form", None)
+    invalidate_form(update, context)
 
     if update.effective_message is not None:
         await update.effective_message.reply_text("Đã hủy nhập thông tin.")
@@ -396,6 +406,16 @@ async def receive_form(
                 customer=user.full_name, device_id=device_id,
             )
             request_id = request["request_id"]
+            existing = data["license_repository"].for_request(request_id)
+            if existing:
+                sent = data["delivery_repository"].succeeded(
+                    request_id=request_id, license_id=existing["license_id"], purpose="customer_license",
+                )
+                await message.reply_text(
+                    "Key đã được cấp và gửi thành công."
+                    if sent else "Key đã được cấp; đang chờ Admin xử lý gửi key."
+                )
+                return
             deliveries = data["delivery_repository"]
             if not deliveries.succeeded(request_id=request_id, purpose="admin_notification"):
                 status = await recorded_send(
@@ -422,12 +442,15 @@ async def receive_form(
                         "Yêu cầu đã lưu. Gửi lại Device ID để thử thông báo lại; không tạo yêu cầu trùng."
                     )
                     return
+        except DeliveryBlocked as error:
+            await message.reply_text("Yêu cầu đã lưu, đang chờ duyệt. " + blocked_message(error))
+            return
         except StorageError:
             await message.reply_text(STORAGE_FAILURE)
             return
 
         await message.reply_text(
-            "✅ Yêu cầu đã được gửi tới Admin.\n\n"
+            "✅ Yêu cầu đã lưu, đang chờ Admin duyệt.\n\n"
             f"Machine ID: {device_id}\n\n"
             "Vui lòng chờ người hỗ trợ liên hệ.",
             reply_markup=build_menu(is_admin=False),
@@ -442,6 +465,17 @@ async def receive_form(
             "Gửi /menu rồi chọn Tạo key — Admin để bắt đầu.",
             reply_markup=build_menu(is_admin=True),
         )
+        return
+
+    if form.get("step") == "reject_reason":
+        try:
+            preview = context.application.bot_data["approval_service"].prepare(
+                form.get("selection_id"), admin_id=user.id, chat_id=chat.id, reason=text,
+            )
+            context.user_data["key_form"] = {"step": "confirm", "form_id": preview["form_id"]}
+            await show_confirmation(message, preview, reason=text)
+        except (RequestUnavailable, StorageError) as error:
+            await message.reply_text(STORAGE_FAILURE if isinstance(error, StorageError) else str(error))
         return
 
     if form.get("step") == "device":
@@ -466,7 +500,7 @@ async def receive_form(
         return
 
     if form.get("step") != "days":
-        context.user_data.pop("key_form", None)
+        invalidate_form(update, context)
         await message.reply_text(
             "Phiên nhập không hợp lệ. Gửi /menu để bắt đầu lại."
         )
@@ -486,50 +520,11 @@ async def receive_form(
     data = context.application.bot_data
     try:
         if request_id:
-            request = data["request_repository"].get(request_id)
-            if request is None:
-                context.user_data.pop("key_form", None)
-                await message.reply_text(MISSING_REQUEST)
-                return
-            record = data["issuance_service"].approve_request(request_id, days=days, issuer=user.id)
-            deliveries = data["delivery_repository"]
-            if deliveries.succeeded(
-                request_id=request_id, license_id=record["license_id"], purpose="customer_license",
-            ):
-                context.user_data.pop("key_form", None)
-                await message.reply_text("Key đã được gửi cho yêu cầu này.")
-                return
-            summary = license_summary(record)
-            status = await recorded_send(
-                deliveries, destination=request["recipient_id"], purpose="customer_license",
-                request_id=request_id, license_id=record["license_id"],
-                send=lambda: context.bot.send_message(
-                    chat_id=int(request["recipient_id"]),
-                    text=(
-                        "✅ License V-CODE của bạn đã được cấp!\n\n"
-                        f"{summary}\n\nActivation Key:\n{record['activation_key']}\n\n"
-                        "Copy toàn bộ chuỗi key ở trên.\n"
-                        "Mở V-CODE → License Support → dán vào Activation Key → Activate."
-                    ),
-                    parse_mode=None,
-                ),
+            preview = data["approval_service"].prepare(
+                form.get("selection_id"), admin_id=user.id, chat_id=chat.id, days=days,
             )
-            if status != "succeeded":
-                detail = (
-                    "Lỗi mạng/tạm thời."
-                    if status == "retryable_failed"
-                    else "Lỗi gửi cố định; kiểm tra khách chặn bot hoặc chat không hợp lệ trước khi thử lại."
-                )
-                await message.reply_text(
-                    f"⚠️ Đã lưu key nhưng chưa xác nhận gửi thành công. {detail}\n"
-                    f"Nhập lại {days} để thử gửi cùng key; sau khởi động lại, chọn lại nút yêu cầu."
-                )
-                return
-            context.user_data.pop("key_form", None)
-            await message.reply_text(
-                f"✅ Đã gửi key cho {request['customer']}.\n\n{summary}",
-                reply_markup=build_menu(is_admin=True),
-            )
+            context.user_data["key_form"] = {"step": "confirm", "form_id": preview["form_id"]}
+            await show_confirmation(message, preview, days=days)
             return
 
         # Manual issuance is recorded too; a form retry retains the persisted license ID.
@@ -545,9 +540,11 @@ async def receive_form(
         elif days != record["duration_days"]:
             await message.reply_text(f"Nhập lại {record['duration_days']} ngày để gửi cùng key.")
             return
-        if await deliver_manual(record, update, context) == "succeeded":
+        if await deliver_manual(record, update, context, explicit_retry=bool(form.get("license_id"))) == "succeeded":
             context.user_data.pop("key_form", None)
             await message.reply_text("Chọn chức năng tiếp theo:", reply_markup=build_menu(is_admin=True))
+    except DeliveryBlocked as error:
+        await message.reply_text(blocked_message(error))
     except StorageError:
         await message.reply_text(STORAGE_FAILURE)
     except RequestUnavailable as error:
@@ -579,6 +576,8 @@ async def select_request(
     request_id = (query.data or "").split(":", 1)[-1]
     data = context.application.bot_data
     try:
+        data["approval_service"].invalidate(query.from_user.id, chat.id)
+        context.user_data.pop("key_form", None)
         request = data["request_repository"].get(request_id)
         if request is None:
             await query.answer(MISSING_REQUEST, show_alert=True)
@@ -588,7 +587,7 @@ async def select_request(
             await query.answer("Yêu cầu đã đóng. Hãy nhờ khách gửi lại Device ID.", show_alert=True)
             return
         if record is not None:
-            require_unexpired(record)
+            require_unexpired(record, data["issuance_service"].database.now())
             if data["delivery_repository"].succeeded(
                 request_id=request_id, license_id=record["license_id"], purpose="customer_license",
             ):
@@ -601,12 +600,18 @@ async def select_request(
         await query.answer(str(error), show_alert=True)
         return
 
+    try:
+        selection_id = data["approval_service"].select(request_id, admin_id=query.from_user.id, chat_id=chat.id)
+    except (RequestUnavailable, StorageError) as error:
+        await query.answer(STORAGE_FAILURE if isinstance(error, StorageError) else str(error), show_alert=True)
+        return
     await query.answer()
 
     context.user_data["key_form"] = {
         "step": "days",
         "device_id": request["device_id"],
         "request_id": request_id,
+        "selection_id": selection_id,
     }
 
     await context.bot.send_message(
@@ -615,10 +620,190 @@ async def select_request(
             f"Khách: {request['customer']}\n"
             f"Machine ID: {request['device_id']}\n\n"
             "Nhập số ngày từ 1 đến 3650.\n"
-            "Bot sẽ gửi key trực tiếp cho khách sau khi tạo.\n"
+            "Tiếp theo sẽ xem lại và bấm Confirm trước khi cấp/gửi key.\n"
             "Gửi /cancel để hủy."
         ),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("Từ chối yêu cầu", callback_data=f"reject:{selection_id}"),
+            InlineKeyboardButton("Cancel", callback_data=f"decision:cancel:{selection_id}"),
+        ]]) if record is None else None,
     )
+
+async def show_confirmation(message, preview, *, days=None, reason=None):
+    request, record, delivery = preview["request"], preview["license"], preview["delivery"]
+    text = (
+        f"Khách: {request['customer']}\nDevice ID: {request['device_id']}\n"
+        f"Recipient: {request['recipient_id']}\nEdition: {record['edition'] if record else 'Professional'}\n"
+    )
+    label = "Confirm"
+    if preview["action"] == "reject":
+        text += f"Từ chối yêu cầu chưa cấp key.\nLý do: {reason}\nKhông thu hồi license offline."
+    else:
+        text += f"Duration: {days} ngày\nDùng lại key đã lưu: {'Có' if record else 'Không, sẽ cấp key mới'}\n"
+        if delivery and delivery["status"] == "unknown":
+            text += "Kết quả lần gửi trước chưa rõ. Thử lại có thể tạo tin nhắn trùng với cùng key.\n"
+            label = "Confirm retry (may duplicate)"
+        if delivery and delivery["status"] == "permanent_failed":
+            text += "Lỗi gửi cố định: hãy sửa quyền gửi/chat trước khi xác nhận thử lại.\n"
+        if delivery and delivery["retry_not_before"]:
+            text += f"Chỉ được thử lại sau {delivery['retry_not_before']}.\n"
+        text += "Chỉ bấm Confirm khi đồng ý cấp/gửi key tới recipient trên."
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup([[
+        InlineKeyboardButton(label, callback_data=f"decision:confirm:{preview['form_id']}"),
+        InlineKeyboardButton("Cancel", callback_data=f"decision:cancel:{preview['form_id']}"),
+    ]]))
+
+
+def is_private_admin(update, context):
+    user = update.callback_query.from_user if update.callback_query else update.effective_user
+    chat = update.effective_chat
+    return user is not None and chat is not None and chat.type == "private" and user.id == context.application.bot_data["admin_id"]
+
+
+async def deliver_customer(request, record, update, context):
+    require_unexpired(record, context.application.bot_data["issuance_service"].database.now())
+    status = await recorded_send(
+        context.application.bot_data["delivery_repository"], destination=request["recipient_id"],
+        purpose="customer_license", request_id=request["request_id"], license_id=record["license_id"],
+        explicit_retry=True, expected_version=record.get("_delivery_version"),
+        send=lambda: context.bot.send_message(
+            chat_id=int(request["recipient_id"]),
+            text=(
+                "✅ License V-CODE của bạn đã được cấp!\n\n"
+                f"{license_summary(record)}\n\nActivation Key:\n{record['activation_key']}\n\n"
+                "Copy toàn bộ key. Mở V-CODE → License Support → dán vào Activation Key → Activate."
+            ), parse_mode=None,
+        ),
+    )
+    messages = {
+        "succeeded": "✅ Telegram đã xác nhận gửi key. Việc này không xác nhận khách đã Activate V-CODE.",
+        "unknown": "Kết quả gửi chưa rõ. Thử lại có thể trùng tin. Chọn lại trong /requests và Confirm retry để gửi cùng key.",
+        "retryable_failed": "Chưa gửi được key (lỗi tạm thời). Chọn lại trong /requests để xác nhận thử lại cùng key, sau thời gian Telegram yêu cầu chờ.",
+        "permanent_failed": "Lỗi gửi cố định. Sửa quyền gửi/chat rồi chọn lại trong /requests để xác nhận thử lại cùng key.",
+    }
+    await update.effective_message.reply_text(messages[status], reply_markup=build_menu(is_admin=True))
+
+
+async def approval_decision(update, context):
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_private_admin(update, context):
+        await query.answer("Chỉ Admin trong chat riêng được xác nhận.", show_alert=True)
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) != 3 or parts[1] not in ("confirm", "cancel"):
+        await query.answer(STALE_FORM, show_alert=True)
+        return
+    service = context.application.bot_data["approval_service"]
+    try:
+        if parts[1] == "cancel":
+            service.cancel(parts[2], admin_id=query.from_user.id, chat_id=update.effective_chat.id)
+            context.user_data.pop("key_form", None)
+            await query.answer("Đã hủy.")
+            return
+        request, record = service.confirm(
+            parts[2], admin_id=query.from_user.id, chat_id=update.effective_chat.id,
+        )
+        context.user_data.pop("key_form", None)
+        await query.answer()
+        if record is None:
+            await update.effective_message.reply_text("Đã từ chối yêu cầu chưa cấp key. Không có license offline nào bị thu hồi.")
+            return
+        await deliver_customer(request, record, update, context)
+    except StorageError:
+        await update.effective_message.reply_text(STORAGE_FAILURE)
+    except DeliveryBlocked as error:
+        await update.effective_message.reply_text(blocked_message(error))
+    except RequestUnavailable as error:
+        await query.answer(str(error), show_alert=True)
+
+
+async def reject_request(update, context):
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_private_admin(update, context):
+        await query.answer("Chỉ Admin trong chat riêng được từ chối.", show_alert=True)
+        return
+    selection_id = (query.data or "").split(":", 1)[-1]
+    try:
+        request = context.application.bot_data["approval_service"].selected_request(
+            selection_id, admin_id=query.from_user.id, chat_id=update.effective_chat.id,
+        )
+        context.user_data["key_form"] = {
+            "step": "reject_reason", "selection_id": selection_id, "request_id": request["request_id"],
+        }
+        await query.answer()
+        await update.effective_message.reply_text("Nhập lý do từ chối (1–300 ký tự, không nhập bí mật), hoặc /cancel.")
+    except (RequestUnavailable, StorageError) as error:
+        await query.answer(STORAGE_FAILURE if isinstance(error, StorageError) else str(error), show_alert=True)
+
+
+async def show_requests(update, context, page):
+    data = context.application.bot_data
+    data["delivery_repository"].recover_stale()
+    invalidate_form(update, context)
+    rows, has_more = data["request_repository"].list_actionable(page=page, admin_id=update.effective_user.id)
+    text = f"Yêu cầu cần xử lý — trang {page + 1}\n"
+    buttons = []
+    for row in rows:
+        state = "Chờ duyệt" if not row["license_id"] else "Đã cấp, chờ gửi"
+        if row["delivery_status"] in ("unknown", "retryable_failed", "permanent_failed", "attempting"):
+            state += f" ({row['delivery_status']})"
+        text += f"\n{row['customer'][:60]} • {row['device_id']}\n{state}\n"
+        if row["request_id"]:
+            buttons.append([InlineKeyboardButton(
+                f"Chọn {row['customer'][:25]} • {row['request_id'][:8]}", callback_data=f"request:{row['request_id']}",
+            )])
+        else:
+            text += f"Key tạo thủ công: /retry {row['license_id']}\n"
+    navigation = []
+    if page:
+        navigation.append(InlineKeyboardButton("← Trước", callback_data=f"requests:{page - 1}"))
+    if has_more:
+        navigation.append(InlineKeyboardButton("Sau →", callback_data=f"requests:{page + 1}"))
+    if navigation:
+        buttons.append(navigation)
+    await update.effective_message.reply_text(text if rows else text + "Không có yêu cầu cần xử lý.",
+                                              reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def requests_command(update, context):
+    if update.effective_message is None:
+        return
+    if not is_private_admin(update, context):
+        await update.effective_message.reply_text("Chỉ Admin trong chat riêng được xem yêu cầu.")
+        return
+    try:
+        page = int(context.args[0]) - 1 if context.args else 0
+        if not 0 <= page <= 10000:
+            raise ValueError
+        await show_requests(update, context, page)
+    except ValueError:
+        await update.effective_message.reply_text("Cách dùng: /requests [số trang từ 1].")
+    except StorageError:
+        await update.effective_message.reply_text(STORAGE_FAILURE)
+
+
+async def requests_page(update, context):
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_private_admin(update, context):
+        await query.answer("Chỉ Admin trong chat riêng được xem yêu cầu.", show_alert=True)
+        return
+    try:
+        page = int((query.data or "").split(":", 1)[-1])
+        if not 0 <= page <= 10000:
+            raise ValueError
+        await query.answer()
+        await show_requests(update, context, page)
+    except ValueError:
+        await query.answer("Trang không hợp lệ.", show_alert=True)
+    except StorageError:
+        await update.effective_message.reply_text(STORAGE_FAILURE)
+
 
 def main():
     load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -663,6 +848,10 @@ def main():
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("generate", generate))
     app.add_handler(CommandHandler("retry", retry_manual))
+    app.add_handler(CommandHandler("requests", requests_command))
+    app.add_handler(CallbackQueryHandler(requests_page, pattern=r"^requests:"))
+    app.add_handler(CallbackQueryHandler(reject_request, pattern=r"^reject:"))
+    app.add_handler(CallbackQueryHandler(approval_decision, pattern=r"^decision:"))
     app.add_handler(CommandHandler("menu", start))
     app.add_handler(
         CallbackQueryHandler(menu_click, pattern=r"^menu:")

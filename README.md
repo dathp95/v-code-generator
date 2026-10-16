@@ -106,8 +106,11 @@ The pure helper API remains storage-independent; application entry points use
 
 ```text
 services/issuance_service.py           # Transactional request approval and issuance
+services/approval_service.py           # Expiring, single-use confirmation forms
+services/delivery_service.py           # Claimed delivery, deadlines, safe error handling
 storage/database.py                    # Connections, foreign keys, schema versioning
 storage/migrations/001_initial.sql      # Transactional initial schema
+storage/migrations/002_reliable_workflow.sql # Claims, unknown outcomes, rejection audit, forms
 storage/repositories/request_repository.py
 storage/repositories/license_repository.py
 storage/repositories/delivery_repository.py
@@ -154,6 +157,11 @@ Startup initializes the schema atomically using versioned SQL migrations and
 `PRAGMA user_version`. Repeated initialization is safe; a schema newer than the
 application is refused. Foreign keys are enabled on every connection. `sqlite3`
 is included with Python; no database server is required.
+Migration 002 upgrades commit-12 databases transactionally, preserving request,
+license, exact token/payload, and delivery records. Migration 001 is unchanged.
+Legacy `attempting` rows and recorded timeouts become `unknown`, since their
+delivery outcome cannot be inferred. Back up before upgrading; commit 12 cannot
+open the upgraded schema.
 
 The database keeps requests (channel, recipient/user IDs, customer, normalized
 Device ID, approval status, UTC timestamps), licenses (one per request, exact signed
@@ -177,34 +185,80 @@ creating a duplicate request. A successful notification is not resent on every
 submission.
 
 Only the administrator in a private chat can approve and issue customer keys.
-Selecting a request and entering its duration saves its license before delivery.
-After a failed delivery, enter the same duration again. After restart, click the
-original `request:<id>` button and enter that duration. The exact stored token,
-payload, license ID, and recipient are reused. Repeated approval cannot create a
-second license for the same request. Already acknowledged customer deliveries
-are not resent through the request flow.
+Use `/requests` (or `/requests 2`, etc.) for pages of at most eight pending or
+issued-but-unsent requests, including failed and unknown deliveries. Page buttons
+and the original `request:<id>` buttons select persisted requests after restart.
+Unsent manual Telegram licenses belonging to Admin also appear with their
+`/retry LICENSE_ID` recovery command; CLI output records remain in the database.
+
+Selecting a request binds its persisted ID to a server-side form. Enter Days to
+preview the customer, normalized Device ID, recipient, edition, duration, and
+whether the existing key will be reused. **Entering Days does not issue or send a
+key.** Press **Confirm** to proceed, or **Cancel** to discard it. The server checks
+the admin, private chat, request/license/delivery snapshot, and expiry again at
+confirmation. Forms expire after ten minutes and are single-use. Selecting another
+request, navigating menus, `/requests`, `/generate`, or `/cancel` invalidates older
+confirmation buttons for that admin/chat. Changed state requires a fresh preview.
+
+For an unissued pending request, select **Từ chối yêu cầu**, enter a reason
+(1–300 characters, no secrets), and confirm. Rejection records the admin, UTC time,
+and reason, and closes that request without issuing a key. It does not revoke any
+offline license. Issued requests cannot be rejected. A customer may submit a new
+request for fresh admin review.
+
+After a failed delivery, select the request again, enter its original duration,
+review the stored-key preview, and explicitly confirm retry. The exact token,
+payload, license ID, and recipient are reused; no replacement key is created.
+Repeated approval cannot create a second license for a request. Successful
+deliveries are blocked from resend, even when an old button or retry command is
+repeated. Customer resubmissions report the persisted state: pending review,
+issued/delivery pending, or already sent, rather than always claiming review is
+pending.
 
 For keys created manually with `/generate` or the admin menu, use the displayed
-License ID with `/retry LICENSE_ID` to resend the same stored key to Admin,
-including after restart. This command is admin-only. It does not create a license.
+License ID with `/retry LICENSE_ID` to retry the same stored key to Admin,
+including after restart. For an unknown outcome or permanent failure, the command
+first explains the duplicate-message risk and requires the explicit
+`/retry LICENSE_ID confirm` action. Already successful sends are blocked.
+This command is admin-only. It does not create a license.
 CLI licenses and output-attempt records can be recovered from the protected DB;
 there is no CLI retry command in this upgrade.
 
-Network failures, timeouts, and rate limits are recorded as retryable. Forbidden,
-invalid-chat/bad-request, and other Telegram failures are recorded separately as
-permanent failures; fix the delivery problem before retrying manually. There is
-no background retry worker. Expired stored keys are refused, never silently
-reissued: ask the customer to submit their Device ID again to create a new request
-and obtain fresh admin approval.
+Network failures and rate limits are recorded as retryable. Telegram `RetryAfter`
+sets a persisted cooldown; another attempt for that delivery is refused until the
+UTC deadline, including after restart and even with explicit retry. Timeouts have
+an **unknown** outcome. Forbidden, invalid-chat/bad-request, and other Telegram
+failures are recorded as permanent failures; fix the problem before explicitly
+retrying. There is no automatic background retry worker. Expired keys are refused,
+never silently replaced: the customer must submit a new request and obtain fresh
+admin approval.
 
-Timeouts or crashes can happen after Telegram accepts a message but before its
-acknowledgment is saved. An `attempting` record left after a crash has an unknown
-outcome. A manual retry can therefore produce a duplicate message with the same
-key; exactly-once Telegram delivery is **not guaranteed**. A DB failure while
-recording acknowledgment also leaves the outcome uncertain.
+Every send atomically acquires an owned claim before network I/O. The send has a
+30-second I/O deadline and a 120-second lease. Concurrent workers are blocked
+while that claim is live; no DB transaction spans a network await. Completion
+checks the attempt ID, owner, active state, and lease so an old worker cannot
+finalize a newer attempt. The claim also checks the delivery state reviewed by
+Admin, so an outcome that changes after Confirm requires a fresh confirmation.
+Claims survive restart until their leases expire.
+Startup, request-list access, previews, and claims recover expired `attempting`
+records as `unknown`; they are never assumed successful or failed.
 
-Only transient input forms remain in RAM. New request buttons work after restart
-against the same database. Pre-upgrade RAM-only requests cannot be recovered;
+Unknown outcomes require explicit admin review and a **Confirm retry (may
+duplicate)** action. First check whether the original message arrived and ensure
+any hung old worker is stopped. Timeouts, suspended processes, or crashes can
+occur after Telegram accepts a message but before acknowledgment is stored.
+SQLite fencing cannot retract a network request already sent to Telegram. A
+manual retry may therefore produce a duplicate message with the same key;
+exactly-once Telegram delivery is **not guaranteed**. A DB failure while recording
+acknowledgment also leaves the outcome uncertain until the claim expires.
+
+**Issued** means the signed key is saved. **Sent** means Telegram acknowledged
+delivery and that acknowledgment was saved. **Activated** means V-CODE accepted a
+key on the customer's device; this tool does not receive or report that event.
+
+Transient input steps may remain in RAM; confirmation state is stored server-side
+in SQLite. New request buttons work after restart against the same database.
+Pre-upgrade RAM-only requests cannot be recovered;
 old buttons show a resubmission message. Previously generated output files are
 not imported. Keep this database when upgrading or moving the bot; starting with
 an empty DB loses deduplication and retry history.

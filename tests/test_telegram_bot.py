@@ -3,12 +3,12 @@
 import unittest
 import tempfile
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
 
@@ -25,7 +25,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.data = {"admin_id": 1, "license_service": self.service}
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.database = Database(Path(directory.name) / "test.sqlite3")
+        self.now = datetime(2026, 10, 16, tzinfo=UTC)
+        self.database = Database(Path(directory.name) / "test.sqlite3", clock=lambda: self.now)
         bot.configure_storage(self.data, self.service, self.database)
         self.context = SimpleNamespace(
             application=SimpleNamespace(bot_data=self.data),
@@ -71,60 +72,38 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.service.issue_activation.assert_not_called()
         callback = self.context.bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0][0].callback_data
         request_id = callback.split(":", 1)[1]
-        request = self.data["request_repository"].get(request_id)
-        self.assertEqual(request["recipient_id"], "222")
-        self.assertEqual(request["status"], "pending")
-        self.assertEqual(self.context.bot.send_message.await_args.kwargs["chat_id"], 1)
-        self.assertEqual(callback, f"request:{request_id}")
-        # A separate pending request must never affect this request's recipient.
+        self.assertEqual(self.data["request_repository"].get(request_id)["recipient_id"], "222")
         self.data["request_repository"].create_or_get_pending(
             channel="telegram", recipient_id=333, user_id=33, customer="Other", device_id=DEVICE_ID,
         )
         self.update.effective_user = SimpleNamespace(id=1)
         self.update.effective_chat.id = 1
-        self.update.callback_query = SimpleNamespace(
-            from_user=self.update.effective_user, data=callback, answer=AsyncMock(),
-        )
-        await bot.select_request(self.update, self.context)
-        self.message.text = "30"
-        self.context.bot.send_message.reset_mock()
-        self.context.bot.send_message.side_effect = TelegramError("mock delivery failure")
-        await bot.receive_form(self.update, self.context)
-        request = self.data["request_repository"].get(request_id)
-        self.assertEqual(request["status"], "approved")
-        record = self.data["license_repository"].for_request(request_id)
-        cached_key = record["activation_key"]
-        cached_payload = record["payload"]
-        failed_delivery = self.context.bot.send_message.await_args.kwargs
-        self.assertEqual(failed_delivery["chat_id"], 222)
-        self.assertIn(cached_key, failed_delivery["text"])
-        self.service.issue_activation.assert_called_once_with(
-            device_id=DEVICE_ID, customer="Customer", edition="Professional", days=30,
-        )
-        self.message.text = "31"
-        await bot.receive_form(self.update, self.context)
-        self.assertEqual(self.context.bot.send_message.await_count, 1)
-        self.message.text = "30"
+        await self.select(request_id)
+        await self.enter_days()
+        self.service.issue_activation.assert_not_called()
+        self.context.bot.send_message.side_effect = TelegramError("mock failure")
+        await self.confirm()
+        saved = self.data["license_repository"].for_request(request_id)
+        first = self.context.bot.send_message.await_args.kwargs
+        self.assertEqual(first["chat_id"], 222)
+        self.assertIn(saved["activation_key"], first["text"])
         self.context.bot.send_message.side_effect = None
-        await bot.receive_form(self.update, self.context)
+        await self.select(request_id)
+        await self.enter_days("31")
+        self.assertEqual(self.context.user_data["key_form"]["step"], "days")
+        await self.enter_days()
+        await self.confirm()
+        self.assertEqual(self.context.bot.send_message.await_args.kwargs, first)
         self.service.issue_activation.assert_called_once()
-        self.assertEqual(self.context.bot.send_message.await_args.kwargs, failed_delivery)
-        record = self.data["license_repository"].for_request(request_id)
-        self.assertEqual(record["activation_key"], cached_key)
-        self.assertEqual(record["payload"], cached_payload)
+        self.assertEqual(self.data["license_repository"].for_request(request_id), saved)
         self.assertEqual(self.data["request_repository"].get(request_id)["status"], "approved")
-        self.assertTrue(self.data["delivery_repository"].succeeded(
-            request_id=request_id, license_id=record["license_id"], purpose="customer_license",
-        ))
+        await self.select(request_id)
         self.assertNotIn("key_form", self.context.user_data)
-        await bot.select_request(self.update, self.context)
-        self.assertNotIn("key_form", self.context.user_data)
-        self.service.issue_activation.assert_called_once()
 
     async def test_manual_command_and_form_use_service(self):
         await bot.generate(self.update, self.context)
         self.service.issue_activation.assert_called_once_with(
-            device_id=DEVICE_ID, customer="Test Customer", edition="Professional", days=30,
+            device_id=DEVICE_ID, customer="Test Customer", edition="Professional", days=30, issued_at=ANY,
         )
         self.service.reset_mock()
         self.context.user_data["key_form"] = {"step": "device"}
@@ -133,7 +112,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.message.text = "30"
         await bot.receive_form(self.update, self.context)
         self.service.issue_activation.assert_called_once_with(
-            device_id=DEVICE_ID, customer="Test Customer", edition="Professional", days=30,
+            device_id=DEVICE_ID, customer="Test Customer", edition="Professional", days=30, issued_at=ANY,
         )
         self.assertNotIn("key_form", self.context.user_data)
         self.context.bot.send_message.assert_not_awaited()
@@ -152,7 +131,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def reopen(self):
-        self.database = Database(self.database.path)
+        self.database = Database(self.database.path, clock=lambda: self.now)
         bot.configure_storage(self.data, self.service, self.database)
         self.context.user_data.clear()
 
@@ -161,6 +140,18 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             from_user=self.update.effective_user, data=f"request:{request_id}", answer=AsyncMock(),
         )
         await bot.select_request(self.update, self.context)
+
+    async def enter_days(self, days="30"):
+        self.message.text = days
+        await bot.receive_form(self.update, self.context)
+
+    async def confirm(self, callback=None):
+        if callback is None:
+            callback = f"decision:confirm:{self.context.user_data['key_form']['form_id']}"
+        self.update.callback_query = SimpleNamespace(
+            from_user=self.update.effective_user, data=callback, answer=AsyncMock(),
+        )
+        await bot.approval_decision(self.update, self.context)
 
     async def test_pending_callback_after_database_reopen(self):
         request = self.make_request()
@@ -176,6 +167,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.message.text = "30"
         self.context.bot.send_message.side_effect = TimedOut("sensitive-test-sentinel")
         await bot.receive_form(self.update, self.context)
+        await self.confirm()
         saved = self.data["license_repository"].for_request(request["request_id"])
         original_delivery = self.context.bot.send_message.await_args.kwargs
         self.service.issue_activation.assert_called_once()
@@ -192,6 +184,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
         self.context.bot.send_message.side_effect = acknowledged
         await bot.receive_form(self.update, self.context)
+        await self.confirm()
         retried = self.data["license_repository"].for_request(request["request_id"])
         self.assertEqual(retried, saved)
         self.assertEqual(self.context.bot.send_message.await_args.kwargs, original_delivery)
@@ -199,7 +192,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         history = self.data["delivery_repository"].history(
             request_id=request["request_id"], license_id=saved["license_id"], purpose="customer_license",
         )
-        self.assertEqual([row["status"] for row in history], ["retryable_failed", "succeeded"])
+        self.assertEqual([row["status"] for row in history], ["unknown", "succeeded"])
         self.assertEqual(history[0]["error_category"], "timeout")
         self.assertEqual(history[1]["telegram_message_id"], 456)
         self.assertNotIn("sensitive-test-sentinel", str(history))
@@ -231,10 +224,10 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
     async def test_license_write_failure_rolls_back_approval_and_prevents_delivery(self):
         request = self.make_request()
         await self.select(request["request_id"])
-        self.message.text = "30"
+        await self.enter_days()
         self.context.bot.send_message.reset_mock()
         with patch.object(LicenseRepository, "add", side_effect=sqlite3.OperationalError("sensitive-test-sentinel")):
-            await bot.receive_form(self.update, self.context)
+            await self.confirm()
         self.context.bot.send_message.assert_not_awaited()
         self.assertIsNone(self.data["license_repository"].for_request(request["request_id"]))
         self.assertEqual(self.data["request_repository"].get(request["request_id"])["status"], "pending")
@@ -243,10 +236,10 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
     async def test_attempt_write_failure_prevents_customer_delivery(self):
         request = self.make_request()
         await self.select(request["request_id"])
-        self.message.text = "30"
+        await self.enter_days()
         self.context.bot.send_message.reset_mock()
         with patch.object(self.data["delivery_repository"], "start", side_effect=bot.StorageError("safe failure")):
-            await bot.receive_form(self.update, self.context)
+            await self.confirm()
         self.context.bot.send_message.assert_not_awaited()
         self.assertIsNotNone(self.data["license_repository"].for_request(request["request_id"]))
 
@@ -293,17 +286,19 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             request_id=request["request_id"], license_id=record["license_id"],
             destination=222, purpose="customer_license",
         )
+        self.now += timedelta(seconds=121)
         self.reopen()
         self.service.reset_mock()
         await self.select(request["request_id"])
         self.message.text = "30"
         await bot.receive_form(self.update, self.context)
+        await self.confirm()
         self.service.issue_activation.assert_not_called()
         self.assertIn(record["activation_key"], self.context.bot.send_message.await_args.kwargs["text"])
         history = self.data["delivery_repository"].history(
             request_id=request["request_id"], license_id=record["license_id"], purpose="customer_license",
         )
-        self.assertEqual([row["status"] for row in history], ["attempting", "succeeded"])
+        self.assertEqual([row["status"] for row in history], ["unknown", "succeeded"])
 
     async def test_unhandled_errors_log_only_fixed_category(self):
         context = SimpleNamespace(error=NetworkError("sensitive-test-sentinel"))
@@ -313,27 +308,31 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("network", str(captured.output))
 
     async def test_manual_retry_after_restart_reuses_persisted_license(self):
+        self.message.reply_text.side_effect = [SimpleNamespace(message_id=1), TimedOut("test"), None]
         await bot.generate(self.update, self.context)
+        self.message.reply_text.side_effect = None
         with self.database.connection() as connection:
             record = dict(connection.execute("SELECT * FROM licenses").fetchone())
         self.reopen()
         self.service.reset_mock()
         self.context.args = [record["license_id"]]
         await bot.retry_manual(self.update, self.context)
-        self.service.issue_activation.assert_not_called()
+        self.assertNotEqual(self.message.reply_text.await_args.args[0], record["activation_key"])
+        self.context.args.append("confirm")
+        await bot.retry_manual(self.update, self.context)
         self.assertEqual(self.message.reply_text.await_args.args[0], record["activation_key"])
-        history = self.data["delivery_repository"].history(
-            license_id=record["license_id"], purpose="manual_license",
-        )
-        self.assertEqual([row["attempt_number"] for row in history], [1, 2])
+        self.service.issue_activation.assert_not_called()
+        history = self.data["delivery_repository"].history(license_id=record["license_id"], purpose="manual_license")
+        self.assertEqual([row["status"] for row in history], ["unknown", "succeeded"])
+        await bot.retry_manual(self.update, self.context)
+        self.assertNotEqual(self.message.reply_text.await_args.args[0], record["activation_key"])
         self.update.effective_user.id = 2
-        self.message.reply_text.reset_mock()
         await bot.retry_manual(self.update, self.context)
         self.assertNotEqual(self.message.reply_text.await_args.args[0], record["activation_key"])
 
     def test_error_classification_uses_only_safe_categories(self):
         for error, expected in (
-            (TimedOut("test"), ("retryable_failed", "timeout")),
+            (TimedOut("test"), ("unknown", "timeout")),
             (NetworkError("test"), ("retryable_failed", "network")),
             (RetryAfter(5), ("retryable_failed", "rate_limited")),
             (Forbidden("test"), ("permanent_failed", "forbidden")),
