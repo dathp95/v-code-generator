@@ -16,13 +16,9 @@ from uuid import uuid4
 
 from datetime import datetime
 
-from generate_activation import (
-    generate_activation_key,
-    load_private_key,
-    validate_device_id,
-)
-
-load_dotenv(Path(__file__).resolve().parent / ".env")
+from core.crypto.activation import validate_device_id
+from core.crypto.key_loader import load_private_key
+from core.services.license_service import LicenseService
 
 
 def build_menu(is_admin=False):
@@ -240,13 +236,13 @@ async def generate(
             if not 1 <= days <= 3650:
                 raise ValueError("Số ngày phải từ 1 đến 3650.")
 
-            activation_key, payload = generate_activation_key(
+            issued = context.application.bot_data["license_service"].issue_activation(
                 device_id=device_id,
                 customer="Test Customer",
                 edition="Professional",
                 days=days,
-                private_key=context.application.bot_data["private_key"],
             )
+            activation_key, payload = issued.activation_key, issued.payload
         except ValueError as error:
             await message.reply_text(f"Không tạo được key: {error}")
             return
@@ -435,7 +431,7 @@ async def receive_form(
         payload = request["payload"]
     else:
         try:
-            activation_key, payload = generate_activation_key(
+            issued = context.application.bot_data["license_service"].issue_activation(
                 device_id=form["device_id"],
                 customer=(
                     request["customer"]
@@ -444,8 +440,8 @@ async def receive_form(
                 ),
                 edition="Professional",
                 days=days,
-                private_key=context.application.bot_data["private_key"],
             )
+            activation_key, payload = issued.activation_key, issued.payload
         except ValueError as error:
             await message.reply_text(f"Không tạo được key: {error}")
             return
@@ -571,6 +567,7 @@ async def select_request(
     )
 
 def main():
+    load_dotenv(Path(__file__).resolve().parent / ".env")
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     admin_text = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
     key_path = os.getenv("VC_PRIVATE_KEY", "").strip()
@@ -602,7 +599,7 @@ def main():
     app = Application.builder().token(token).build()
 
     app.bot_data["admin_id"] = admin_id
-    app.bot_data["private_key"] = private_key
+    app.bot_data["license_service"] = LicenseService(private_key)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", myid))

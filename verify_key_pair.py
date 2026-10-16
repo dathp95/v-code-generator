@@ -9,17 +9,9 @@ import getpass
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 
-
-def load_private_key(path: Path, passphrase: bytes) -> RSAPrivateKey:
-    try:
-        key = serialization.load_pem_private_key(path.expanduser().read_bytes(), password=passphrase)
-    except Exception as error:
-        raise ValueError("Unable to load encrypted private key.") from error
-    if not isinstance(key, RSAPrivateKey):
-        raise ValueError("Private key must be an RSA private key.")
-    return key
+from core.crypto.key_loader import load_private_key
 
 
 def load_public_key(path: Path) -> RSAPublicKey:

@@ -8,10 +8,14 @@
 output/
 activation.dat
 activation-*.json
+activation-*.txt
+*.lic
 
 # Python
 .venv/
 .env
+.env.*
+.test-runtime/
 __pycache__/
 *.pyc
 
