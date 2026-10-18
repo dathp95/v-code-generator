@@ -52,6 +52,9 @@ def configure_storage(bot_data, license_service, database):
     bot_data["issuance_service"] = IssuanceService(license_service, database)
     bot_data["approval_service"] = ApprovalService(bot_data["issuance_service"])
     bot_data["delivery_repository"].recover_stale()
+    from services.subscription_service import SubscriptionService
+    bot_data['subscription_service'] = SubscriptionService(database, bot_data['admin_id'])
+    bot_data['subscription_service'].recover_notifications()
 
 def blocked_message(error):
     messages = {
@@ -70,6 +73,7 @@ def invalidate_form(update, context):
     if user and chat and user.id == context.application.bot_data["admin_id"]:
         context.application.bot_data["approval_service"].invalidate(user.id, chat.id)
     context.user_data.pop("key_form", None)
+    context.user_data.pop('subscription_form', None)
 
 def license_summary(record, label="Machine ID"):
     payload = record["payload"]
@@ -198,6 +202,11 @@ async def receive_form(
         return
 
     if chat.type != "private":
+        return
+
+    if context.user_data.get('subscription_form'):
+        from integrations.telegram.handlers.subscription import receive_input
+        await receive_input(update, context)
         return
 
     admin_id = context.application.bot_data["admin_id"]
@@ -436,11 +445,15 @@ async def select_request(
         "selection_id": selection_id,
     }
 
+    order = data['subscription_service'].orders.for_request(request_id)
+    suggestion = f"Đơn {order['reference']} · đã mua {order['purchased_days']} ngày. Gợi ý Days: {order['purchased_days']}.\n" if order else ''
+
     await context.bot.send_message(
         chat_id=chat.id,
         text=(
             f"Khách: {request['customer']}\n"
             f"Machine ID: {request['device_id']}\n\n"
+            f"{suggestion}"
             "Nhập số ngày từ 1 đến 3650.\n"
             "Tiếp theo sẽ xem lại và bấm Confirm trước khi cấp/gửi key.\n"
             "Gửi /cancel để hủy."
@@ -461,6 +474,8 @@ async def show_confirmation(message, preview, *, days=None, reason=None):
     if preview["action"] == "reject":
         text += f"Từ chối yêu cầu chưa cấp key.\nLý do: {reason}\nKhông thu hồi license offline."
     else:
+        if request.get('subscription_days'):
+            text += f"Đơn: {request['order_reference']}\nĐã mua: {request['subscription_days']} ngày · Thực cấp: {days} ngày\n"
         text += f"Duration: {days} ngày\nDùng lại key đã lưu: {'Có' if record else 'Không, sẽ cấp key mới'}\n"
         if delivery and delivery["status"] == "unknown":
             text += "Kết quả lần gửi trước chưa rõ. Thử lại có thể tạo tin nhắn trùng với cùng key.\n"

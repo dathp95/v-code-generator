@@ -17,7 +17,7 @@ class RecordsTab(QWidget):
         self.repository, self.runner, self.theme = repository, runner, theme
         self.columns, self.id_field = columns, id_field
         self.records, self.page, self.generation = [], 0, 0
-        self.sort = "created_at" if id_field == "request_id" else "issued_at" if id_field == "license_id" else "delivery_id"
+        self.sort = "created_at" if id_field in ("request_id", "order_id") else "issued_at" if id_field == "license_id" else "delivery_id"
         self.descending = True
         self.ready = False
         layout = QVBoxLayout(self)

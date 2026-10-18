@@ -339,7 +339,7 @@ class ChildTests(unittest.IsolatedAsyncioTestCase):
         with redirect_stdout(stream): register_handlers(app)
         self.assertEqual(stream.getvalue(), "")
         commands = {next(iter(c.args[0].commands)) for c in app.add_handler.call_args_list if hasattr(c.args[0], "commands")}
-        self.assertEqual(commands, {"start", "menu", "myid", "generate", "requests", "retry", "cancel"})
+        self.assertEqual(commands, {"start", "menu", "myid", "generate", "requests", "retry", "cancel", "orders"})
 
     async def test_request_confirmation_delivery_retry_events_and_gui_refresh(self):
         # Existing workflow end-to-end, through its managed-event boundary.

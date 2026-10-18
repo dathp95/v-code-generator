@@ -5,6 +5,7 @@ GUIDE_CHANNEL_URL = "https://t.me/+xBQZPGeEHpZiM2Q9"
 
 def build_menu(is_admin=False):
     buttons = [
+        [InlineKeyboardButton('💳 Đăng ký theo tháng', callback_data='menu:subscribe')],
         [
             InlineKeyboardButton(
                 "📖 Hướng dẫn kích hoạt",

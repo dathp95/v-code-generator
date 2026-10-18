@@ -6,6 +6,7 @@ from core.services.license_service import LicenseService
 from storage.database import Database
 from storage.repositories.license_repository import LicenseRepository
 from storage.repositories.request_repository import RequestRepository
+from storage.repositories.subscription_repository import require_subscription_paid
 
 
 class RequestUnavailable(ValueError):
@@ -40,6 +41,7 @@ class IssuanceService:
         request = self.requests.get(request_id, connection=connection)
         if request is None or request["status"] == "closed":
             raise RequestUnavailable("Yêu cầu không còn hợp lệ. Hãy nhờ khách gửi lại Device ID.")
+        require_subscription_paid(connection, request)
         self.license_service.validate_inputs(
             request["device_id"], request["customer"], "Professional", days,
         )

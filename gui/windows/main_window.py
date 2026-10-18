@@ -10,6 +10,8 @@ from gui.tabs.telegram_bot_tab import TelegramBotTab
 from gui.tabs.deliveries_tab import DeliveriesTab
 from gui.tabs.licenses_tab import LicensesTab
 from gui.tabs.requests_tab import RequestsTab
+from gui.tabs.orders_tab import OrdersTab
+from storage.repositories.subscription_repository import SubscriptionRepository
 from gui.tabs.settings_tab import SettingsTab
 from gui.themes.theme import ThemeManager
 from gui.widgets.controls.controls import Button
@@ -63,7 +65,9 @@ class MainWindow(QMainWindow):
         self.deliveries = DeliveriesTab(DeliveryRepository(self.database), self.runner, self.theme)
         self.settings_tab = SettingsTab(self.database, self.settings, self.theme, self.session)
         self.telegram_tab = TelegramBotTab(self.database, self.settings, self.bot)
-        for tab, title in ((self.requests, "Requests"), (self.licenses, "Licenses"), (self.deliveries, "Delivery History"), (self.telegram_tab, "Telegram Bot"), (self.settings_tab, "Settings")):
+        self.orders = OrdersTab(SubscriptionRepository(self.database), self.runner, self.theme)
+        self.record_tabs = (self.requests, self.licenses, self.deliveries, self.orders)
+        for tab, title in ((self.requests, "Requests"), (self.licenses, "Licenses"), (self.deliveries, "Delivery History"), (self.telegram_tab, "Telegram Bot"), (self.settings_tab, "Settings"), (self.orders, 'Orders')):
             self.tabs.addTab(tab, title)
         layout.addWidget(self.tabs, 1)
         footer = QLabel("Issued ≠ sent ≠ activated  •  Request approval and retries remain in Telegram")
@@ -96,7 +100,7 @@ class MainWindow(QMainWindow):
         self.session.changed.emit()
         self.refresh_button.setEnabled(False)
         self.error.clear()
-        for tab in (self.requests, self.licenses, self.deliveries):
+        for tab in self.record_tabs:
             tab.ready = False
             tab.refresh_button.setEnabled(False)
 
@@ -105,7 +109,7 @@ class MainWindow(QMainWindow):
             self.refresh_button.setEnabled(True)
             self.session.ready = True
             self.session.changed.emit()
-            for tab in (self.requests, self.licenses, self.deliveries):
+            for tab in self.record_tabs:
                 tab.ready = True
                 tab.refresh_button.setEnabled(True)
                 tab.refresh()
@@ -114,7 +118,7 @@ class MainWindow(QMainWindow):
             self._initializing = False
             self.refresh_button.setEnabled(True)
             self.error.setText(message)
-            for tab in (self.requests, self.licenses, self.deliveries):
+            for tab in self.record_tabs:
                 tab.page_label.setText("Storage unavailable · use Refresh all to retry")
 
         self.runner.run(self.database.initialize, ready, failed)
@@ -147,5 +151,5 @@ class MainWindow(QMainWindow):
         if self.runner.busy or self._initializing:
             self.bot_refresh.start()
             return
-        for tab in (self.requests, self.licenses, self.deliveries):
+        for tab in self.record_tabs:
             tab.refresh()

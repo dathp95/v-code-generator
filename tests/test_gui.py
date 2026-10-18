@@ -129,6 +129,39 @@ class GuiTests(unittest.TestCase):
         wait_until(lambda: not self.window.session.unlocking and not self.window.runner.busy)
         self.assertTrue(self.window.session.unlocked)
 
+    def test_orders_read_only_filter_selection_event_refresh_and_manual_signing(self):
+        from services.subscription_service import SubscriptionConfig, SubscriptionService
+        from test_subscriptions import PNG
+        qr = self.root / 'synthetic-payment.png'
+        qr.write_bytes(PNG)
+        orders = SubscriptionService(self.db, 1, config=SubscriptionConfig(99_000, 12, 30, 'Test', 'Test', '000', qr))
+        order = orders.checkout(user_id=22, chat_id=222, chat_type='private', customer='Test Customer', device_id=DEVICE_ID, months=2)
+        tab = self.window.orders
+        self.window.tabs.setCurrentWidget(tab)
+        self.window.bot.records_changed.emit()
+        wait_until(lambda: len(tab.records) == 1 and not self.window.runner.busy)
+        tab.search.setText(order['reference'])
+        wait_until(lambda: not tab.timer.isActive() and not self.window.runner.busy)
+        tab.table.selectRow(0)
+        self.assertEqual(tab.selected()['order_id'], order['order_id'])
+        orders.report_payment(order['order_id'], user_id=22, chat_id=222, chat_type='private')
+        self.window.bot.records_changed.emit()
+        wait_until(lambda: tab.records[0]['payment_status'] == 'payment_reported' and not self.window.runner.busy)
+        self.assertEqual(tab.selected()['order_id'], order['order_id'])
+        self.assertEqual(tab.search.text(), order['reference'])
+        tab.status.setCurrentText('paid')
+        wait_until(lambda: not tab.timer.isActive() and not self.window.runner.busy)
+        self.assertEqual(tab.records, [])
+        self.unlock()
+        # Connected status never changes the independent desktop signing session.
+        self.window.bot._state('Connected')
+        saved, failures = [], []
+        self.window.session.issue(dict(device_id=DEVICE_ID, customer='Manual while bot connected', edition='Professional', days=30), saved.append, failures.append)
+        wait_until(lambda: not self.window.runner.busy)
+        self.assertEqual(failures, [])
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]['source'], 'desktop_manual')
+
     def dialog(self):
         self.window.tabs.setCurrentWidget(self.window.licenses)
         self.window.licenses.issue_button.click()
@@ -142,7 +175,7 @@ class GuiTests(unittest.TestCase):
         return LicenseRepository(self.db).list_page().total
 
     def test_read_only_startup_without_secrets_or_telegram_import(self):
-        self.assertEqual(self.window.tabs.count(), 5)
+        self.assertEqual(self.window.tabs.count(), 6)
         self.assertFalse(self.window.session.unlocked)
         self.assertFalse(self.window.licenses.issue_button.isEnabled())
         self.assertEqual(self.window.requests.records, [])

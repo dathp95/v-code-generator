@@ -32,3 +32,8 @@ dist/
 
 # Local script containing secrets
 create_activation.bat
+
+# Owner-local bank configuration and supplied private payment assets
+config/subscription.py
+assets/payment/
+assests/payment/

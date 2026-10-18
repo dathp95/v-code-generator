@@ -6,6 +6,7 @@ from uuid import uuid4
 from core.services.license_service import LicenseService
 from services.issuance_service import RequestUnavailable, require_unexpired
 from storage.repositories.delivery_repository import DeliveryRepository, delivery_version
+from storage.repositories.subscription_repository import require_subscription_paid
 
 
 FORM_SECONDS = 600
@@ -42,6 +43,10 @@ class ApprovalService:
         request = self.issuance.requests.get(request_id, connection=connection)
         if request is None or request["status"] == "closed":
             raise RequestUnavailable("Yêu cầu không còn hợp lệ. Hãy nhờ khách gửi lại Device ID.")
+        order = require_subscription_paid(connection, request)
+        if order:
+            request['subscription_days'] = order['purchased_days']
+            request['order_reference'] = order['reference']
         record = self.issuance.licenses.for_request(request_id, connection=connection)
         if record:
             require_unexpired(record, self.database.now())

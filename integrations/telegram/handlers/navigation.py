@@ -74,6 +74,11 @@ async def menu_click(
         )
         return
 
+    if query.data == 'menu:subscribe':
+        from integrations.telegram.handlers.subscription import begin
+        await begin(update, context)
+        return
+
     if query.data == "menu:generate" and not is_admin:
         await query.answer(
             "Chỉ Admin được sử dụng chức năng này.",

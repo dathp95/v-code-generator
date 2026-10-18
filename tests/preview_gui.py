@@ -21,6 +21,8 @@ from core.services.license_service import LicenseService
 from gui.dialogs.issue_license_dialog import IssueLicenseDialog
 from gui.windows.main_window import MainWindow
 from services.issuance_service import IssuanceService
+from services.subscription_service import SubscriptionConfig, SubscriptionService
+from test_subscriptions import PNG
 from storage.database import Database
 from storage.repositories.delivery_repository import DeliveryRepository
 from storage.repositories.request_repository import RequestRepository
@@ -68,6 +70,16 @@ def main():
                                   message_id=42 if outcome == "succeeded" else None)
         issuance.issue_manual(device_id=DEVICE_ID, customer="Vehicle Integration", edition="Professional",
                               days=365, issuer="local_admin", source="desktop_manual")
+        qr = root / 'synthetic-payment.png'
+        qr.write_bytes(PNG)
+        subscriptions = SubscriptionService(database, 1, config=SubscriptionConfig(99_000, 12, 30, 'Test Bank', 'Test Owner', '000', qr))
+        for user in (11, 12, 13):
+            order = subscriptions.checkout(user_id=user, chat_id=10000 + user, customer=f'Demo Order {user}', device_id=DEVICE_ID, months=user - 10, chat_type='private')
+            if user == 12:
+                subscriptions.report_payment(order['order_id'], user_id=user, chat_id=10000 + user, chat_type='private')
+            if user == 13:
+                _, nonce = subscriptions.review_payment(order['order_id'], admin_id=1, chat_id=1, chat_type='private')
+                subscriptions.confirm_payment(nonce, admin_id=1, chat_id=1, chat_type='private')
         window = MainWindow(database, AppSettings(root / "desktop.ini"))
         window.show()
         wait_until(lambda: window.session.ready and not window.runner.busy)
@@ -80,7 +92,7 @@ def main():
 
         for name, index in (("light", 0), ("dark", 1)):
             window.settings_tab.theme_choice.setCurrentIndex(index)
-            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "telegram"), (4, "settings")):
+            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "telegram"), (4, "settings"), (5, 'orders')):
                 window.tabs.setCurrentIndex(tab)
                 if tab < 3:
                     (window.requests, window.licenses, window.deliveries)[tab].table.selectRow(0)
@@ -90,6 +102,8 @@ def main():
                     settings.password.setText("temporary-only")
                     settings.unlock.click()
                     wait_until(lambda: not window.runner.busy)
+                if tab == 5:
+                    window.orders.table.selectRow(0)
                 capture(window, f"{name}-{tab_name}")
             dialog = IssueLicenseDialog(window.session, window)
             dialog.show()
@@ -112,9 +126,13 @@ def main():
         capture(window, "dark-telegram-compact")
         window.settings_tab.theme_choice.setCurrentIndex(0)
         capture(window, "light-telegram-compact")
+        window.tabs.setCurrentWidget(window.orders)
+        capture(window, 'light-orders-compact')
+        window.settings_tab.theme_choice.setCurrentIndex(1)
+        capture(window, 'dark-orders-compact')
         window.close()
         window.runner.pool.waitForDone()
-    print("Saved 16 GUI validation screenshots using temporary data.")
+    print("Saved 20 GUI validation screenshots using temporary data.")
 
 
 if __name__ == "__main__":

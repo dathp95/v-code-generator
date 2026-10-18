@@ -410,6 +410,92 @@ old buttons show a resubmission message. Previously generated output files are
 not imported. Keep this database when upgrading or moving the bot; starting with
 an empty DB loses deduplication and retry history.
 
+## Monthly subscriptions with manual bank confirmation
+
+Customers choose **💳 Đăng ký theo tháng**, enter a valid Machine ID and
+1–12 integer months. The default is **99,000 VND/month**, **1 month = 30 days**;
+these values come from the owner-local configuration. Checkout saves the order
+before sending the owner's QR and Vietnamese payment instructions. The order
+reference is also the required transfer reference. An existing unpaid order for
+the same customer/chat/device is resumed, including after restart; new input
+does not silently change its months or price. `/orders` lists the customer's own
+orders in private chat, with view/report/cancel actions.
+
+**Đã chuyển khoản** records `payment_reported` and sends at most one admin
+notification. It does not verify a bank transaction, mark an order paid or sign a
+key. Customers can cancel awaiting/reported orders but cannot cancel paid orders.
+Admin uses the private `/orders` list or the notification's **💰 Xác nhận đã nhận
+tiền** button, personally checks the bank transaction, reviews the order and
+customer identity, then explicitly Confirms. Payment reviews are server-side,
+admin/chat-bound, expire after ten minutes and are invalidated by another payment
+review or Cancel. Repeated confirmation is idempotent. Payment confirmation saves
+`paid_at`/`confirmed_by` and atomically links exactly one new license request;
+it does **not** create a license.
+
+Admin then selects that request, enters Days (the purchased days are suggested),
+reviews purchased versus actual issuance days, recipient and key reuse, and uses
+the existing final **Confirm**. The existing 1–3650-day limit remains in force.
+The license is persisted before automatic delivery to the original customer chat.
+Subscription-linked requests must pass the paid gate in the issuance and approval
+services, including alternate existing approval paths. Free requests, `/generate`
+and desktop manual issuance remain available. Failed/unknown customer delivery
+uses the existing reviewed manual retry, exact saved key, claims, fencing and
+cooldowns; payment is never reconfirmed to generate a replacement key.
+
+Payment, issuance, Telegram delivery and V-CODE activation are separate states.
+There is no bank API, payment detection, recurring billing, automatic renewal or
+background license resend. If cancellation wins a race with payment confirmation,
+confirmation is refused; any real bank transfer then requires owner handling
+outside this tool. No automatic refund is performed.
+
+### Owner setup and payment asset handling
+
+On a fresh checkout, copy `config/subscription_example.py` to the ignored
+`config/subscription.py`. Edit only `config/subscription.py` for
+`MONTHLY_PRICE_VND`, `MAX_SUBSCRIPTION_MONTHS`, `DAYS_PER_MONTH`, `BANK_NAME`,
+`BANK_ACCOUNT_NAME`, `BANK_ACCOUNT_NUMBER` and `PAYMENT_QR_PATH`. Fill in the
+owner's real bank details; the tracked example contains placeholders. The default
+QR path is `assets/payment/payment_qr.png`, resolved relative to this repository,
+independent of cwd. Place/replace the **supplied** PNG there; the application does
+not generate or fabricate bank QR codes. Restart the standalone or managed bot
+after changing the local configuration.
+
+For this upgrade, the supplied commit-16 image was preserved byte-for-byte from
+the misspelled `assests/payment/` path into the ignored `assets/payment/` path.
+Its old tracked path is removed from the current Git tree, and local bank config
+and both payment asset directories are ignored. This does not remove the image
+from earlier Git history. Fresh clones need their own local config and supplied
+image; neither is part of the new commit. No `.env` or token/password storage is
+changed. Launch as before with `python main.py` → Connect or `python telegram_bot.py`.
+
+Missing/invalid local config or a missing/unreadable QR disables new checkout with
+a clear configuration error. Existing saved orders still open through `/orders`:
+checkout snapshots integer VND totals, bank details, transfer reference and QR
+image bytes in SQLite. Later config/QR changes affect only new orders. Preserve
+and back up the database to retain those instructions and payment audit records;
+back up the owner-local configuration and supplied image separately as needed.
+
+The read-only desktop **Orders** tab provides search, status filters, pagination,
+order/request/license linkage, purchased/issued days and delivery status. Managed
+bot events and reconciliation refresh it through the existing workers, preserving
+filters and selection. Payment confirmation and issuance approval stay in Telegram;
+desktop manual signing remains independent while the bot is connected.
+
+Admin `/orders` is also the recovery path for missed payment notifications.
+A notification is claimed before network I/O to prevent duplicate sends from
+repeated clicks. Failed notifications remain visible as `failed`; timeouts are
+`unknown`. Startup or `/orders` recovers notification claims older than 120 seconds
+as `unknown`, with no automatic resend. An unknown notification may already have
+arrived; review the persisted order rather than repeatedly asking the customer to
+report payment. License deliveries retain their existing, separate retry history.
+
+New implementation: `config/subscription_example.py`,
+`services/subscription_service.py`,
+`storage/repositories/subscription_repository.py`, migration
+`003_subscriptions.sql`, `integrations/telegram/handlers/subscription.py` and
+`gui/tabs/orders_tab.py`. Applied migrations 001/002 are unchanged; version 3 upgrades
+transactionally, preserving licenses, requests, confirmation and delivery history.
+
 ## Backup and restore
 
 Do not copy a live SQLite database file by itself. Use SQLite's backup API, or

@@ -2,6 +2,7 @@
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from integrations.telegram.handlers.workflow import *
 from integrations.telegram.handlers.navigation import start, menu_click, myid
+from integrations.telegram.handlers.subscription import order_action, orders_command
 
 def register_handlers(app):
     app.add_error_handler(handle_error)
@@ -10,6 +11,9 @@ def register_handlers(app):
     app.add_handler(CommandHandler("generate", generate))
     app.add_handler(CommandHandler("retry", retry_manual))
     app.add_handler(CommandHandler("requests", requests_command))
+    app.add_handler(CommandHandler("orders", orders_command))
+    app.add_handler(CallbackQueryHandler(order_action, pattern=r'^order:'))
+    app.add_handler(CallbackQueryHandler(orders_command, pattern=r'^orders:'))
     app.add_handler(CallbackQueryHandler(requests_page, pattern=r"^requests:"))
     app.add_handler(CallbackQueryHandler(reject_request, pattern=r"^reject:"))
     app.add_handler(CallbackQueryHandler(approval_decision, pattern=r"^decision:"))
