@@ -66,9 +66,9 @@ class Database:
             raise StorageError("Unable to initialize license storage.") from None
         with self.transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > 3:
+            if version > 4:
                 raise StorageError("Database schema is newer than this application supports.")
-            for target, name in ((1, "001_initial.sql"), (2, "002_reliable_workflow.sql"), (3, "003_subscriptions.sql")):
+            for target, name in ((1, "001_initial.sql"), (2, "002_reliable_workflow.sql"), (3, "003_subscriptions.sql"), (4, "004_customer_profiles.sql")):
                 if version >= target:
                     continue
                 migration = Path(__file__).parent / "migrations" / name

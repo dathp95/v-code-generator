@@ -17,7 +17,7 @@ class RecordsTab(QWidget):
         self.repository, self.runner, self.theme = repository, runner, theme
         self.columns, self.id_field = columns, id_field
         self.records, self.page, self.generation = [], 0, 0
-        self.sort = "created_at" if id_field in ("request_id", "order_id") else "issued_at" if id_field == "license_id" else "delivery_id"
+        self.sort = "updated_at" if id_field == 'profile_id' else "created_at" if id_field in ("request_id", "order_id") else "issued_at" if id_field == "license_id" else "delivery_id"
         self.descending = True
         self.ready = False
         layout = QVBoxLayout(self)
@@ -124,12 +124,13 @@ class RecordsTab(QWidget):
             if generation != self.generation:
                 return
             self.records, self.page = result.records, result.number
+            self.table.blockSignals(True)
             self.table.setRowCount(0)
             self.table.setRowCount(len(self.records))
             for row, record in enumerate(self.records):
                 for column, (key, _) in enumerate(self.columns):
                     value = record.get(key)
-                    text = format_local(value) if key.endswith("_at") else str(value if value is not None else "—")
+                    text = self._display_value(record, key, value)
                     if value == "succeeded" and key in ("status", "delivery_status"):
                         text = "Output saved" if record.get("purpose") in ("cli_stdout", "cli_file") else "Sent · acknowledged"
                     if value == "unknown":
@@ -144,7 +145,9 @@ class RecordsTab(QWidget):
                 if record[self.id_field] == selected_id:
                     self.table.selectRow(row)
                     break
-            self._selection_changed()
+            self.table.blockSignals(False)
+            self.table.itemSelectionChanged.emit()
+            self._records_loaded()
             start = result.number * result.size + 1 if result.total else 0
             self.page_label.setText(f"{start}–{min((result.number + 1) * result.size, result.total)} of {result.total}  ·  Page {result.number + 1}")
             self.previous.setEnabled(result.number > 0)
@@ -157,10 +160,18 @@ class RecordsTab(QWidget):
 
         self.runner.run(lambda: self.repository.list_page(**kwargs), success, failure)
 
+    def _records_loaded(self):
+        """Hook for local presentation updates after a repository refresh."""
+
+    def _display_value(self, record, key, value):
+        if key == 'company':
+            return value or '—'
+        return format_local(value) if key.endswith('_at') else str(value if value is not None else '—')
+
     def _selection_changed(self):
         record = self.selected()
         self.details.setPlainText("\n".join(
-            f"{key.replace('_', ' ').title()}: {format_local(value) if key.endswith('_at') or key in ('lease_until', 'retry_not_before') else value}"
+            f"{key.replace('_', ' ').title()}: {format_local(value) if key in ('lease_until', 'retry_not_before') else self._display_value(record, key, value)}"
             for key, value in (record or {}).items()
             if value is not None and key not in ("payload_json", "activation_key", "claim_owner", "scope")
         ))

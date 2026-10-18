@@ -30,14 +30,16 @@ class Colors:
     danger: str
     warning: str
     warning_background: str
+    expiry_red: str
+    expiry_green: str
 
 
 LIGHT = Colors("#0078D4", "#2899F5", "#005A9E", "#FFFFFF", "#F6F8FA", "#202020",
                "#586574", "#D9DFE5", "#D6E9F8", "#102D43", "#FFFFFF", "#E5E9ED",
-               "#626D78", "#B42332", "#805000", "#FFF3D6")
+               "#626D78", "#B42332", "#805000", "#FFF3D6", "#B42332", "#16713B")
 DARK = Colors("#4CC2FF", "#70D1FF", "#008ECC", "#202124", "#2B2B2B", "#F2F2F2",
               "#B0BAC5", "#484D53", "#4CC2FF", "#10212A", "#10212A", "#363A40",
-              "#A3ABB5", "#FF9595", "#FFE2A6", "#49381C")
+              "#A3ABB5", "#FF9595", "#FFE2A6", "#49381C", "#FF9595", "#78DC9A")
 
 
 class ThemeManager(QObject):

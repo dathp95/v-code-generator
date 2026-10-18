@@ -391,7 +391,7 @@ class MigrationTests(unittest.TestCase):
             database.initialize()
             database.initialize()
             with database.connection() as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
                 saved = dict(connection.execute("SELECT * FROM licenses").fetchone())
                 self.assertEqual(saved["activation_key"], key.activation_key)
                 self.assertEqual(saved["payload_json"], canonical_payload_bytes(key.payload).decode())

@@ -9,6 +9,7 @@ from uuid import uuid4
 from core.crypto.activation import validate_device_id, validate_non_empty
 from storage.database import REPOSITORY_ROOT
 from storage.repositories.subscription_repository import SubscriptionRepository
+from services.customer_service import CustomerService, validate_metadata
 
 
 class SubscriptionError(ValueError):
@@ -78,7 +79,7 @@ class SubscriptionService:
             raise SubscriptionError('Không tìm thấy đơn của bạn trong chat này.')
         return order
 
-    def checkout(self, *, user_id, chat_id, customer, device_id, months, chat_type):
+    def checkout(self, *, user_id, chat_id, customer, device_id, months, chat_type, company=None):
         self._private(chat_type)
         device_id = validate_device_id(device_id)
         customer = validate_non_empty('customer', customer)
@@ -91,6 +92,8 @@ class SubscriptionService:
             if type(months) is not int or not 1 <= months <= config.max_months:
                 raise SubscriptionError(f'Nhập số tháng nguyên từ 1 đến {config.max_months}.')
             qr = config.qr_bytes()
+            profile = CustomerService(self.database).ensure('telegram', user_id, customer, connection=connection)
+            snapshot_company = profile['company'] if company is None else validate_metadata(company)
             order_id = uuid4().hex
             reference = 'VC' + order_id.upper()
             details = dict(bank=config.bank, account_name=config.account_name, account_number=config.account_number,
@@ -99,11 +102,11 @@ class SubscriptionService:
             connection.execute("""INSERT INTO subscription_orders
                 (order_id, reference, user_id, recipient_id, customer, device_id, edition, months,
                  purchased_days, unit_price_vnd, total_vnd, currency, payment_details_json, qr_image,
-                 payment_status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'Professional', ?, ?, ?, ?, 'VND', ?, ?, 'awaiting_payment', ?, ?)""",
-                (order_id, reference, str(user_id), str(chat_id), customer, device_id, months,
+                 payment_status, created_at, updated_at, company)
+                VALUES (?, ?, ?, ?, ?, ?, 'Professional', ?, ?, ?, ?, 'VND', ?, ?, 'awaiting_payment', ?, ?, ?)""",
+                (order_id, reference, str(user_id), str(chat_id), profile['display_name'], device_id, months,
                  months * config.days_per_month, config.monthly_price, months * config.monthly_price,
-                 json.dumps(details, ensure_ascii=False, sort_keys=True), qr, now, now))
+                 json.dumps(details, ensure_ascii=False, sort_keys=True), qr, now, now, snapshot_company))
             return self.orders.get(order_id, connection=connection)
 
     def report_payment(self, order_id, **identity):

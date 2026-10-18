@@ -39,7 +39,7 @@ class SubscriptionRepository:
     def list_page(self, *, search='', status='all', page=0, size=25, sort='created_at', descending=True, user_id=None, recipient_id=None):
         if status not in ('all', *STATUSES):
             raise ValueError('Unsupported payment status.')
-        select = """SELECT o.order_id, o.reference, o.customer, o.device_id, o.edition, o.months,
+        select = """SELECT o.order_id, o.reference, o.customer, coalesce(nullif(o.company, ''), '—') AS company, o.device_id, o.edition, o.months,
             o.purchased_days, o.unit_price_vnd, o.total_vnd, o.currency, o.payment_status,
             o.user_id, o.recipient_id, o.created_at, o.updated_at, o.reported_at, o.paid_at,
             o.confirmed_by, o.cancelled_at, o.request_id, o.notification_status,

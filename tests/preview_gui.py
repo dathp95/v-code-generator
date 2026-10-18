@@ -1,7 +1,7 @@
 """Render isolated Light/Dark validation screenshots; never opens a production DB."""
 
 import argparse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
 import sys
@@ -22,6 +22,7 @@ from gui.dialogs.issue_license_dialog import IssueLicenseDialog
 from gui.windows.main_window import MainWindow
 from services.issuance_service import IssuanceService
 from services.subscription_service import SubscriptionConfig, SubscriptionService
+from services.customer_service import CustomerService
 from test_subscriptions import PNG
 from storage.database import Database
 from storage.repositories.delivery_repository import DeliveryRepository
@@ -73,14 +74,22 @@ def main():
         qr = root / 'synthetic-payment.png'
         qr.write_bytes(PNG)
         subscriptions = SubscriptionService(database, 1, config=SubscriptionConfig(99_000, 12, 30, 'Test Bank', 'Test Owner', '000', qr))
+        profiles = CustomerService(database)
         for user in (11, 12, 13):
+            profiles.ensure('telegram', user, f'Demo Customer {user}')
+            profiles.edit_admin(channel='telegram', user_id=user, display_name=f'Demo Customer {user}', company=f'Example Company {user}')
             order = subscriptions.checkout(user_id=user, chat_id=10000 + user, customer=f'Demo Order {user}', device_id=DEVICE_ID, months=user - 10, chat_type='private')
             if user == 12:
                 subscriptions.report_payment(order['order_id'], user_id=user, chat_id=10000 + user, chat_type='private')
             if user == 13:
                 _, nonce = subscriptions.review_payment(order['order_id'], admin_id=1, chat_id=1, chat_type='private')
                 subscriptions.confirm_payment(nonce, admin_id=1, chat_id=1, chat_type='private')
+        expiry_now = datetime(2026, 10, 18, 12, tzinfo=UTC)
+        for days in (1, 3, 4):
+            issuance.issue_manual(device_id=DEVICE_ID, customer=f'Expiry example · {days} days', edition='Professional',
+                days=days, issuer='local_admin', source='desktop_manual', issued_at=expiry_now)
         window = MainWindow(database, AppSettings(root / "desktop.ini"))
+        window.licenses.clock = lambda: expiry_now
         window.show()
         wait_until(lambda: window.session.ready and not window.runner.busy)
 
@@ -92,7 +101,7 @@ def main():
 
         for name, index in (("light", 0), ("dark", 1)):
             window.settings_tab.theme_choice.setCurrentIndex(index)
-            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "telegram"), (4, "settings"), (5, 'orders')):
+            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "telegram"), (4, "settings"), (5, 'orders'), (6, 'customers')):
                 window.tabs.setCurrentIndex(tab)
                 if tab < 3:
                     (window.requests, window.licenses, window.deliveries)[tab].table.selectRow(0)
@@ -104,6 +113,13 @@ def main():
                     wait_until(lambda: not window.runner.busy)
                 if tab == 5:
                     window.orders.table.selectRow(0)
+                if tab == 6:
+                    window.customers.table.selectRow(0)
+                if tab == 1:
+                    row = next(i for i, record in enumerate(window.licenses.records) if record['customer'] == 'Expiry example · 1 days')
+                    window.licenses.table.selectRow(row)
+                    window.licenses.table.scrollToItem(window.licenses.table.item(row, 6))
+                    window.licenses.table.clearSelection()
                 capture(window, f"{name}-{tab_name}")
             dialog = IssueLicenseDialog(window.session, window)
             dialog.show()
@@ -130,9 +146,13 @@ def main():
         capture(window, 'light-orders-compact')
         window.settings_tab.theme_choice.setCurrentIndex(1)
         capture(window, 'dark-orders-compact')
+        window.tabs.setCurrentWidget(window.customers)
+        capture(window, 'dark-customers-compact')
+        window.settings_tab.theme_choice.setCurrentIndex(0)
+        capture(window, 'light-customers-compact')
         window.close()
         window.runner.pool.waitForDone()
-    print("Saved 20 GUI validation screenshots using temporary data.")
+    print("Saved 24 GUI validation screenshots using temporary data.")
 
 
 if __name__ == "__main__":

@@ -278,6 +278,10 @@ class SubscriptionTelegramTests(unittest.IsolatedAsyncioTestCase):
         await ui.begin(self.update, self.context)
         self.message.text = DEVICE_ID
         await workflow.receive_form(self.update, self.context)
+        from integrations.telegram.handlers.customer import company_action
+        nonce = self.context.user_data['subscription_form']['company_nonce']
+        self.callback('company:skip:' + nonce)
+        await company_action(self.update, self.context)
         self.message.text = '2'
         await workflow.receive_form(self.update, self.context)
         return self.orders.orders.list_page().records[0]['order_id']

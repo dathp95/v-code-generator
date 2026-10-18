@@ -1,6 +1,6 @@
 """Optional desktop tests: temporary storage/keys, real Qt workers, no messaging."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
 import sqlite3
@@ -28,7 +28,7 @@ except ImportError:
 from cryptography.hazmat.primitives import serialization
 from core.services.license_service import LicenseService
 from services.issuance_service import IssuanceService
-from storage.database import Database
+from storage.database import Database, StorageError
 from storage.repositories.delivery_repository import DeliveryRepository
 from storage.repositories.license_repository import LicenseRepository
 from storage.repositories.request_repository import RequestRepository
@@ -162,6 +162,99 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0]['source'], 'desktop_manual')
 
+    def test_customer_editor_workers_validation_and_current_company_refresh(self):
+        from services.customer_service import CustomerService
+        customers = CustomerService(self.db)
+        customers.ensure('telegram', 22, 'Original Customer')
+        request = RequestRepository(self.db).create_or_get_pending(channel='telegram', recipient_id=222,
+            user_id=22, customer='Original Customer', device_id=DEVICE_ID)
+        saved = IssuanceService(LicenseService(self.key), self.db).approve_request(request['request_id'], days=30, issuer=1)
+        self.window.bot.records_changed.emit()
+        tab = self.window.customers
+        self.window.tabs.setCurrentWidget(tab)
+        wait_until(lambda: len(tab.records) == 1 and not self.window.runner.busy)
+        tab.table.selectRow(0)
+        self.assertTrue(tab.user_id.isReadOnly())
+        tab.company.setText('x' * 151)
+        tab.save_button.click()
+        self.assertIn('150', tab.feedback.text())
+        self.assertEqual(customers.customers.get('telegram', 22)['company'], '')
+        threads = []
+        edit = tab.service.edit_admin
+        def record_thread(**values):
+            threads.append(QThread.currentThread())
+            return edit(**values)
+        tab.name.setText(' Admin Edited ')
+        tab.company.setText('  Company Name  ')
+        with patch.object(tab.service, 'edit_admin', side_effect=record_thread):
+            tab.save_button.click()
+            wait_until(lambda: not self.window.runner.busy)
+        self.assertNotEqual(threads[0], self.application.thread())
+        wait_until(lambda: self.window.licenses.records and self.window.licenses.records[0]['company'] == 'Company Name' and not self.window.runner.busy)
+        self.assertIn('Saved successfully', tab.feedback.text())
+        self.assertEqual(tab.selected()['user_id'], '22')
+        self.assertEqual(tab.name.text(), 'Admin Edited')
+        self.assertEqual(LicenseRepository(self.db).get(saved['license_id']), saved)
+        tab.company.setText('Another Company')
+        with patch.object(tab.service, 'edit_admin', side_effect=StorageError('safe test error')):
+            tab.save_button.click()
+            wait_until(lambda: not self.window.runner.busy)
+        self.assertIn('Storage unavailable', tab.feedback.text())
+        self.assertEqual(customers.customers.get('telegram', 22)['company'], 'Company Name')
+
+    def test_one_expiry_timer_no_queries_selection_reset_and_theme_colors(self):
+        from PySide6.QtGui import QColor
+        from PySide6.QtCore import QTimer
+        now = datetime(2026, 10, 18, 12, tzinfo=UTC)
+        wall = [now]
+        tab = self.window.licenses
+        tab.clock = lambda: wall[0]
+        issue = IssuanceService(LicenseService(self.key), self.db)
+        records = [issue.issue_manual(device_id=DEVICE_ID, customer=f'Clock {days}', edition='Professional',
+            days=days, issued_at=now, source='desktop_manual', issuer='local_admin') for days in (3, 4, 1)]
+        invalid = issue.issue_manual(device_id=DEVICE_ID, customer='Invalid expiry', edition='Professional',
+            days=30, issued_at=now, source='desktop_manual', issuer='local_admin')
+        with self.db.transaction() as connection:
+            connection.execute('UPDATE licenses SET expires_at = ? WHERE license_id = ?', ('invalid', invalid['license_id']))
+        tab.refresh()
+        wait_until(lambda: not self.window.runner.busy)
+        self.window.tabs.setCurrentWidget(tab)
+        index = next(i for i, r in enumerate(tab.records) if r['license_id'] == records[0]['license_id'])
+        tab.table.selectRow(index)
+        expiry_column = next(i for i, (name, _) in enumerate(tab.columns) if name == 'expires_at')
+        remaining_column = next(i for i, (name, _) in enumerate(tab.columns) if name == 'remaining')
+        item = tab.table.item(index, remaining_column)
+        self.assertIn('3d 0h 0m', item.text())
+        self.assertEqual(item.foreground().color(), QColor(self.window.theme.colors.expiry_green))
+        self.assertEqual(tab.expiry_timer.interval(), 30000)
+        self.assertEqual([timer for timer in tab.findChildren(QTimer) if timer.interval() == 30000], [tab.expiry_timer])
+        original = tab.selected()['license_id']
+        state = (tab.page, tab.sort, tab.descending, tab.search.text(), tab.table.currentRow())
+        with patch.object(tab.repository, 'list_page', side_effect=AssertionError('Expiry tick must not query SQLite')):
+            wall[0] += timedelta(microseconds=1)
+            tab.expiry_timer.timeout.emit()
+            self.assertEqual(item.foreground().color(), QColor(self.window.theme.colors.expiry_red))
+            self.assertIn('2d 23h 59m', item.text())
+            self.assertIs(tab.table.item(index, remaining_column), item)
+            self.assertEqual(tab.selected()['license_id'], original)
+            self.assertEqual((tab.page, tab.sort, tab.descending, tab.search.text(), tab.table.currentRow()), state)
+            self.assertIn('Remaining: 2d 23h 59m', tab.details.toPlainText())
+            self.assertIn('UTC', tab.details.toPlainText())
+            for name in ('dark', 'light'):
+                self.window.theme.apply(name)
+                tab.table.clearSelection()
+                self.assertEqual(item.foreground().color(), QColor(self.window.theme.colors.expiry_red))
+                tab.table.selectRow(index)
+            wall[0] = now + timedelta(days=4)
+            tab.expiry_timer.timeout.emit()
+            self.assertEqual(item.text(), 'Expired / Đã hết hạn')
+            wall[0] = now - timedelta(days=1)
+            tab.expiry_timer.timeout.emit()
+            self.assertEqual(item.foreground().color(), QColor(self.window.theme.colors.expiry_green))
+        invalid_index = next(i for i, r in enumerate(tab.records) if r['license_id'] == invalid['license_id'])
+        self.assertEqual(tab.table.item(invalid_index, expiry_column).text(), 'Unknown')
+        self.assertEqual(tab.table.item(invalid_index, expiry_column).foreground().color(), QColor(self.window.theme.colors.muted))
+
     def dialog(self):
         self.window.tabs.setCurrentWidget(self.window.licenses)
         self.window.licenses.issue_button.click()
@@ -175,7 +268,7 @@ class GuiTests(unittest.TestCase):
         return LicenseRepository(self.db).list_page().total
 
     def test_read_only_startup_without_secrets_or_telegram_import(self):
-        self.assertEqual(self.window.tabs.count(), 6)
+        self.assertEqual(self.window.tabs.count(), 7)
         self.assertFalse(self.window.session.unlocked)
         self.assertFalse(self.window.licenses.issue_button.isEnabled())
         self.assertEqual(self.window.requests.records, [])

@@ -55,6 +55,8 @@ def configure_storage(bot_data, license_service, database):
     from services.subscription_service import SubscriptionService
     bot_data['subscription_service'] = SubscriptionService(database, bot_data['admin_id'])
     bot_data['subscription_service'].recover_notifications()
+    from services.customer_service import CustomerService
+    bot_data['customer_service'] = CustomerService(database)
 
 def blocked_message(error):
     messages = {
@@ -232,6 +234,7 @@ async def receive_form(
 
         data = context.application.bot_data
         try:
+            data['customer_service'].ensure('telegram', user.id, user.full_name)
             request = data["request_repository"].create_or_get_pending(
                 channel="telegram", recipient_id=chat.id, user_id=user.id,
                 customer=user.full_name, device_id=device_id,

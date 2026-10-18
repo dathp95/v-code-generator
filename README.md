@@ -496,6 +496,53 @@ New implementation: `config/subscription_example.py`,
 `gui/tabs/orders_tab.py`. Applied migrations 001/002 are unchanged; version 3 upgrades
 transactionally, preserving licenses, requests, confirmation and delivery history.
 
+## Customer Company metadata and live license expiry
+
+Monthly registration now follows **Machine ID → Company → Months**. Company is
+optional, trimmed and limited to 150 characters; control characters are rejected.
+Customers can type a Company, choose **Use saved company**, **Change**, or **Skip**.
+Only that customer's private chat can update the saved Company. Skip omits Company
+from the new order and keeps the saved profile value for next time. Existing
+unpaid orders still resume their original instructions and Company snapshot.
+Long payment details are sent separately from the QR when they exceed Telegram's
+caption limit.
+
+Open the desktop **Customers** tab to search by name, Company or Telegram User ID,
+select a profile, edit Name/Company, and choose **Save**. Telegram User ID and
+channel identity are fixed. Writes use background workers with validation and
+success/error feedback; successful saves refresh affected views. These local admin
+edits change the current profile only. Orders keep the name/Company recorded at
+checkout, payment reviews keep their saved order details, and pending approval
+forms and signed license payloads are never rewritten. Company is management
+metadata and is not added to activation tokens.
+
+Migration **004_customer_profiles.sql** adds channel/user-ID profiles and an order
+Company snapshot without changing migrations 001–003. Existing customer identities
+are backfilled from persisted orders/requests with empty Company, shown as **—**.
+License details show **Company (current profile)** only through the persisted
+request's channel/user relationship. Manual licenses without a customer link show
+**—**, even if their Machine ID matches a customer's license.
+
+The **Licenses** table and selected details now show local **Expires** timestamps
+with an explicit UTC offset and **Remaining** days, hours and minutes. Less than
+72 hours is red; exactly 72 hours or more is green. Expired keys show
+**Expired / Đã hết hạn** in red. Missing, naive or malformed expiry timestamps show
+neutral **Unknown**. Text labels also explain the status, including when the
+selection highlight replaces row colors for readability.
+
+One expiry timer recalculates from the current aware UTC wall clock every
+30 seconds and immediately after a refresh. It updates loaded cells and details
+without querying SQLite, rebuilding rows, changing filters/sort order or clearing
+the selected license. No remaining-days value is stored. Existing bot, payment,
+Days confirmation, manual issuance and same-key delivery retry workflows remain
+unchanged. Restart the app/bot to apply the transactional migration; no additional
+configuration or dependencies are needed.
+
+Implementation is separated into `services/customer_service.py`,
+`storage/repositories/customer_repository.py`,
+`integrations/telegram/handlers/customer.py`, `gui/tabs/customers_tab.py`, and
+the reusable `gui/expiry.py`, with existing service/repository/tab integrations.
+
 ## Backup and restore
 
 Do not copy a live SQLite database file by itself. Use SQLite's backup API, or

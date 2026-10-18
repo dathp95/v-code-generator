@@ -5,6 +5,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError, TimedOut
 from core.crypto.activation import validate_device_id
 from services.subscription_service import SubscriptionError
+from services.customer_service import CustomerValidationError
 from storage.database import StorageError
 
 
@@ -35,7 +36,7 @@ def summary(order):
     status = {'awaiting_payment': 'Chờ chuyển khoản', 'payment_reported': 'Khách đã báo chuyển khoản, chưa xác nhận nhận tiền',
               'paid': 'Admin đã xác nhận nhận tiền', 'cancelled': 'Đã hủy'}[order['payment_status']]
     money = lambda amount: f'{amount:,}'.replace(',', '.')
-    return (f"Đơn: {order['reference']}\nMachine ID: {order['device_id']}\nEdition: {order['edition']}\n"
+    return (f"Đơn: {order['reference']}\nCompany: {order.get('company') or '—'}\nMachine ID: {order['device_id']}\nEdition: {order['edition']}\n"
             f"Tháng: {order['months']} · {order['purchased_days']} ngày\n1 tháng = {bank['days_per_month']} ngày\n"
             f"Giá/tháng: {money(order['unit_price_vnd'])} VND\nTổng: {money(order['total_vnd'])} VND\n"
             f"Ngân hàng: {bank['bank']}\nChủ tài khoản: {bank['account_name']}\nSố tài khoản: {bank['account_number']}\n"
@@ -54,7 +55,13 @@ def customer_buttons(order):
 async def show_customer(update, order):
     image = BytesIO(order['qr_image'])
     image.name = 'payment_qr.png'
-    await update.effective_message.reply_photo(photo=image, caption=summary(order), reply_markup=customer_buttons(order))
+    text = summary(order)
+    # Telegram limits captions to 1024 UTF-16 code units; keep the full details intact.
+    if len(text.encode('utf-16-le')) // 2 <= 1024:
+        await update.effective_message.reply_photo(photo=image, caption=text, reply_markup=customer_buttons(order))
+    else:
+        await update.effective_message.reply_photo(photo=image, caption=f"Đơn {order['reference']} · Chi tiết ở tin nhắn tiếp theo.")
+        await update.effective_message.reply_text(text, reply_markup=customer_buttons(order))
 
 
 async def begin(update, context):
@@ -85,21 +92,23 @@ async def receive_input(update, context):
                 context.user_data.pop('subscription_form', None)
                 await show_customer(update, existing)
                 return
-            config = service(context).configuration()
-            config.qr_bytes()
-            form.update(step='months', device_id=device)
-            await update.effective_message.reply_text(f'Nhập số tháng nguyên từ 1 đến {config.max_months}. 1 tháng = {config.days_per_month} ngày.')
+            from integrations.telegram.handlers.customer import offer_company
+            await offer_company(update, context, device)
+            return
+        if form['step'] in ('company', 'company_text'):
+            from integrations.telegram.handlers.customer import receive_company
+            await receive_company(update, context)
             return
         months = int((update.effective_message.text or '').strip())
         order = service(context).checkout(**identity(update), customer=update.effective_user.full_name,
-                                         device_id=form['device_id'], months=months)
+                                         device_id=form['device_id'], months=months, company=form.get('company'))
         context.user_data.pop('subscription_form', None)
         changed(context)
         await show_customer(update, order)
     except StorageError:
         await update.effective_message.reply_text('Không lưu được đơn. Chưa gửi hướng dẫn thanh toán. Hãy thử lại sau.')
     except ValueError as error:
-        await update.effective_message.reply_text(str(error) if isinstance(error, SubscriptionError) else 'Machine ID hoặc số tháng không hợp lệ. Nhập lại hoặc /cancel.')
+        await update.effective_message.reply_text(str(error) if isinstance(error, (SubscriptionError, CustomerValidationError)) else 'Machine ID hoặc số tháng không hợp lệ. Nhập lại hoặc /cancel.')
 
 
 async def notify_admin(context, order):

@@ -12,6 +12,9 @@ from gui.tabs.licenses_tab import LicensesTab
 from gui.tabs.requests_tab import RequestsTab
 from gui.tabs.orders_tab import OrdersTab
 from storage.repositories.subscription_repository import SubscriptionRepository
+from storage.repositories.customer_repository import CustomerRepository
+from services.customer_service import CustomerService
+from gui.tabs.customers_tab import CustomersTab
 from gui.tabs.settings_tab import SettingsTab
 from gui.themes.theme import ThemeManager
 from gui.widgets.controls.controls import Button
@@ -66,9 +69,11 @@ class MainWindow(QMainWindow):
         self.settings_tab = SettingsTab(self.database, self.settings, self.theme, self.session)
         self.telegram_tab = TelegramBotTab(self.database, self.settings, self.bot)
         self.orders = OrdersTab(SubscriptionRepository(self.database), self.runner, self.theme)
-        self.record_tabs = (self.requests, self.licenses, self.deliveries, self.orders)
+        self.customers = CustomersTab(CustomerRepository(self.database), self.runner, self.theme, CustomerService(self.database))
+        self.record_tabs = (self.requests, self.licenses, self.deliveries, self.orders, self.customers)
         for tab, title in ((self.requests, "Requests"), (self.licenses, "Licenses"), (self.deliveries, "Delivery History"), (self.telegram_tab, "Telegram Bot"), (self.settings_tab, "Settings"), (self.orders, 'Orders')):
             self.tabs.addTab(tab, title)
+        self.tabs.addTab(self.customers, 'Customers')
         layout.addWidget(self.tabs, 1)
         footer = QLabel("Issued ≠ sent ≠ activated  •  Request approval and retries remain in Telegram")
         footer.setProperty("role", "muted")
@@ -83,6 +88,7 @@ class MainWindow(QMainWindow):
         self.bot_refresh.setInterval(350)
         self.bot_refresh.timeout.connect(self._refresh_bot_records)
         self.bot.records_changed.connect(lambda: self.bot_refresh.start())
+        self.customers.saved.connect(lambda: self.bot_refresh.start())
         self.reconcile = QTimer(self)
         self.reconcile.setInterval(15000)
         self.reconcile.timeout.connect(lambda: self.bot_refresh.start() if self.bot.active else None)
