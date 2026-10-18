@@ -15,6 +15,9 @@ from storage.repositories.subscription_repository import SubscriptionRepository
 from storage.repositories.customer_repository import CustomerRepository
 from services.customer_service import CustomerService
 from gui.tabs.customers_tab import CustomersTab
+from gui.tabs.revenue_tab import RevenueTab
+from services.revenue_service import RevenueService
+from storage.repositories.revenue_repository import RevenueRepository
 from gui.tabs.settings_tab import SettingsTab
 from gui.themes.theme import ThemeManager
 from gui.widgets.controls.controls import Button
@@ -70,10 +73,12 @@ class MainWindow(QMainWindow):
         self.telegram_tab = TelegramBotTab(self.database, self.settings, self.bot)
         self.orders = OrdersTab(SubscriptionRepository(self.database), self.runner, self.theme)
         self.customers = CustomersTab(CustomerRepository(self.database), self.runner, self.theme, CustomerService(self.database))
-        self.record_tabs = (self.requests, self.licenses, self.deliveries, self.orders, self.customers)
+        self.revenue = RevenueTab(RevenueService(RevenueRepository(self.database)), self.runner, self.theme)
+        self.record_tabs = (self.requests, self.licenses, self.deliveries, self.orders, self.customers, self.revenue)
         for tab, title in ((self.requests, "Requests"), (self.licenses, "Licenses"), (self.deliveries, "Delivery History"), (self.telegram_tab, "Telegram Bot"), (self.settings_tab, "Settings"), (self.orders, 'Orders')):
             self.tabs.addTab(tab, title)
         self.tabs.addTab(self.customers, 'Customers')
+        self.tabs.addTab(self.revenue, 'Revenue')
         layout.addWidget(self.tabs, 1)
         footer = QLabel("Issued ≠ sent ≠ activated  •  Request approval and retries remain in Telegram")
         footer.setProperty("role", "muted")

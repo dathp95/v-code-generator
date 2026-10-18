@@ -543,6 +543,61 @@ Implementation is separated into `services/customer_service.py`,
 `integrations/telegram/handlers/customer.py`, `gui/tabs/customers_tab.py`, and
 the reusable `gui/expiry.py`, with existing service/repository/tab integrations.
 
+## Revenue · confirmed receipts dashboard
+
+Open **Revenue** in the desktop. This reports **confirmed subscription receipts,
+not profit**: only `subscription_orders.payment_status = 'paid'` contributes,
+using `paid_at` as the event time and the saved integer `total_vnd`. It never
+recalculates current prices or infers payment from issuance/delivery. Unpaid,
+reported-only and cancelled orders, manual/free licenses, delivery retries and
+repeated payment confirmations do not add receipts. There are no recurring-revenue
+projections, cost/profit calculations or assumed refunds.
+
+The default is the current calendar month, grouped by day. Set inclusive local
+**From/To** dates, **Day / Week / Month**, Company, Name and optional order reference,
+then **Apply**. The editable Company selector searches saved paid-order Company
+snapshots and includes **All companies** and **Unspecified (blank)**; suggestions
+are bounded to 500 values in the date range, and an exact Company may also be typed.
+Name and reference use literal substring searches (`%` and `_` are not wildcards).
+Blank historical Company snapshots belong to Unspecified. Current profile edits
+never substitute new names/companies into historical reports.
+
+The KPI cards show confirmed total VND, paid orders, and unique customers across
+all applied filters. Unique customers use persisted channel plus the order's saved
+`user_id`; the `telegram_subscription` request channel normalizes to `telegram`.
+The request relationship supplies identity only, never payment or amount. Distinct customer
+counts are calculated independently for each period and the whole range, so
+period customer counts must not be summed to obtain the KPI.
+
+The native Qt bar chart and summary include zero-receipt periods. Weeks begin
+Monday and months follow calendar boundaries. First/last weeks or months clipped
+by the selected dates are explicitly labeled **partial**. Click a summary period
+to narrow only the paginated order details, retaining the other filters and
+whole-range KPI totals. **All periods** clears that selection. Details show order
+reference, paid time, saved customer/Company, months, saved VND total, confirming
+admin and request/license IDs; linked licenses do not multiply order counts.
+**Refresh** retains applied filters/detail selection; if filters were edited it
+applies them. **Reset** returns to the current month/day view. Automatic managed-bot
+refreshes leave unapplied edits alone. Loading, empty and recoverable error states
+are shown explicitly; stale worker results cannot overwrite newer filters.
+
+Configure the nonsecret `REPORT_TIMEZONE = 'Asia/Ho_Chi_Minh'` in
+`config/reporting.py` and restart the desktop after changes. The timezone is shown
+in the tab and is independent of the computer's display timezone. Inclusive local
+dates become UTC boundaries from local midnight through **exclusive next-day
+midnight**. Grouping uses local calendar dates, preserving UTC-offset and
+microsecond boundaries. `requirements-gui.txt` includes `tzdata` so `ZoneInfo`
+works on Windows; install/update that dependency file before launching.
+
+Reports allow at most **1,096 inclusive days** and **366 chart buckets**; choose
+Week/Month or narrow dates when necessary. Detail pages contain 25 rows. KPI,
+summary, suggestions and detail queries share one explicit read transaction and
+run off the GUI thread. Totals are never calculated from a page of details.
+Reporting queries select only receipt metadata, never QR blobs or activation keys.
+The implementation is `storage/repositories/revenue_repository.py`,
+`services/revenue_service.py`, `gui/tabs/revenue_tab.py` and a small shared native
+Qt bar-chart control. No schema migration or new reporting index was needed.
+
 ## Backup and restore
 
 Do not copy a live SQLite database file by itself. Use SQLite's backup API, or

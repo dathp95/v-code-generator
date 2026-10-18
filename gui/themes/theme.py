@@ -74,6 +74,8 @@ class ThemeManager(QObject):
             QMainWindow, QDialog {{ background: {c.window}; }}
             QLabel[role='title'] {{ font-size: 22pt; font-weight: 600; }}
             QLabel[role='heading'] {{ font-size: 15pt; font-weight: 600; }}
+            QLabel[role='kpi_value'] {{ font-size: 17pt; font-weight: 600; color: {c.primary}; }}
+            QFrame[role='kpi'] {{ background: {c.panel}; border: 1px solid {c.border}; border-radius: 6px; }}
             QLabel[role='muted'] {{ color: {c.muted}; }}
             QLabel[role='error'] {{ color: {c.danger}; padding: 5px 0; }}
             QLabel[role='badge'] {{ color: {c.primary}; background: {c.panel}; border: 1px solid {c.border}; border-radius: 6px; padding: 7px 12px; }}
@@ -84,7 +86,7 @@ class ThemeManager(QObject):
             QPushButton[variant='primary']:hover {{ background: {c.hover}; }}
             QPushButton[variant='primary']:pressed {{ background: {c.pressed}; }}
             QPushButton:disabled {{ background: {c.disabled}; color: {c.disabled_text}; border-color: {c.border}; }}
-            QLineEdit, QComboBox, QSpinBox {{ background: {c.window}; border: 1px solid {c.border}; border-radius: 5px; padding: 7px; min-height: 20px; }}
+            QLineEdit, QComboBox, QSpinBox, QDateEdit {{ background: {c.window}; border: 1px solid {c.border}; border-radius: 5px; padding: 7px; min-height: 20px; }}
             QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color: {c.primary}; }}
             QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ background: {c.disabled}; color: {c.disabled_text}; }}
             QComboBox QAbstractItemView {{ background: {c.window}; selection-background-color: {c.selection}; selection-color: {c.selected_text}; }}

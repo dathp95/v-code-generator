@@ -4,3 +4,4 @@ cryptography==49.0.0
 python-telegram-bot==22.8
 python-dotenv==1.2.4
 keyring==25.7.0
+tzdata==2025.2

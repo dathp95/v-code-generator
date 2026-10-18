@@ -5,10 +5,11 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal
 from core.exceptions import ActivationValidationError, PrivateKeyLoadError
 from storage.database import StorageError
 from services.customer_service import CustomerValidationError
+from services.revenue_service import RevenueError
 
 
 def safe_error(error):
-    if isinstance(error, CustomerValidationError):
+    if isinstance(error, (CustomerValidationError, RevenueError)):
         return str(error)
     if isinstance(error, StorageError):
         return "Storage unavailable. Check the database path and permissions, then Refresh all. No unrecorded key is displayed."

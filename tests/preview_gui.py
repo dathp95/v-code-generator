@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -85,11 +85,21 @@ def main():
                 _, nonce = subscriptions.review_payment(order['order_id'], admin_id=1, chat_id=1, chat_type='private')
                 subscriptions.confirm_payment(nonce, admin_id=1, chat_id=1, chat_type='private')
         expiry_now = datetime(2026, 10, 18, 12, tzinfo=UTC)
+        original_clock = database.clock
+        for user, day, months in ((21, 9, 1), (22, 14, 2), (23, 24, 3)):
+            database.clock = lambda day=day: datetime(2026, 10, day, 8, tzinfo=UTC)
+            order = subscriptions.checkout(user_id=user, chat_id=10000 + user, customer=f'Receipt example {user}',
+                device_id=DEVICE_ID, months=months, chat_type='private')
+            _, nonce = subscriptions.review_payment(order['order_id'], admin_id=1, chat_id=1, chat_type='private')
+            subscriptions.confirm_payment(nonce, admin_id=1, chat_id=1, chat_type='private')
+        database.clock = original_clock
         for days in (1, 3, 4):
             issuance.issue_manual(device_id=DEVICE_ID, customer=f'Expiry example · {days} days', edition='Professional',
                 days=days, issuer='local_admin', source='desktop_manual', issued_at=expiry_now)
         window = MainWindow(database, AppSettings(root / "desktop.ini"))
         window.licenses.clock = lambda: expiry_now
+        window.revenue.service.clock = lambda: expiry_now
+        window.revenue.reset_filters()
         window.show()
         wait_until(lambda: window.session.ready and not window.runner.busy)
 
@@ -101,7 +111,7 @@ def main():
 
         for name, index in (("light", 0), ("dark", 1)):
             window.settings_tab.theme_choice.setCurrentIndex(index)
-            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "telegram"), (4, "settings"), (5, 'orders'), (6, 'customers')):
+            for tab, tab_name in ((0, "requests"), (1, "licenses"), (2, "deliveries"), (3, "telegram"), (4, "settings"), (5, 'orders'), (6, 'customers'), (7, 'revenue')):
                 window.tabs.setCurrentIndex(tab)
                 if tab < 3:
                     (window.requests, window.licenses, window.deliveries)[tab].table.selectRow(0)
@@ -121,6 +131,11 @@ def main():
                     window.licenses.table.scrollToItem(window.licenses.table.item(row, 6))
                     window.licenses.table.clearSelection()
                 capture(window, f"{name}-{tab_name}")
+                if tab == 7:
+                    area = window.revenue.findChild(QScrollArea)
+                    area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
+                    capture(window, f'{name}-revenue-details')
+                    area.verticalScrollBar().setValue(0)
             dialog = IssueLicenseDialog(window.session, window)
             dialog.show()
             dialog.prepare_review()
@@ -150,9 +165,13 @@ def main():
         capture(window, 'dark-customers-compact')
         window.settings_tab.theme_choice.setCurrentIndex(0)
         capture(window, 'light-customers-compact')
+        window.tabs.setCurrentWidget(window.revenue)
+        capture(window, 'light-revenue-compact')
+        window.settings_tab.theme_choice.setCurrentIndex(1)
+        capture(window, 'dark-revenue-compact')
         window.close()
         window.runner.pool.waitForDone()
-    print("Saved 24 GUI validation screenshots using temporary data.")
+    print("Saved 30 GUI validation screenshots using temporary data.")
 
 
 if __name__ == "__main__":
