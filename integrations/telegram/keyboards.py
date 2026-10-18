@@ -1,11 +1,20 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+GUIDE_CHANNEL_URL = "https://t.me/+xBQZPGeEHpZiM2Q9"
+
+
 def build_menu(is_admin=False):
     buttons = [
         [
             InlineKeyboardButton(
                 "📖 Hướng dẫn kích hoạt",
                 callback_data="menu:guide",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📺 Video hướng dẫn sử dụng",
+                url=GUIDE_CHANNEL_URL,
             )
         ],
         [
