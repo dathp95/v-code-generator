@@ -75,10 +75,25 @@ class MainWindow(QMainWindow):
         self.customers = CustomersTab(CustomerRepository(self.database), self.runner, self.theme, CustomerService(self.database))
         self.revenue = RevenueTab(RevenueService(RevenueRepository(self.database)), self.runner, self.theme)
         self.record_tabs = (self.requests, self.licenses, self.deliveries, self.orders, self.customers, self.revenue)
-        for tab, title in ((self.requests, "Requests"), (self.licenses, "Licenses"), (self.deliveries, "Delivery History"), (self.telegram_tab, "Telegram Bot"), (self.settings_tab, "Settings"), (self.orders, 'Orders')):
-            self.tabs.addTab(tab, title)
+        
         self.tabs.addTab(self.customers, 'Customers')
         self.tabs.addTab(self.revenue, 'Revenue')
+
+        # Thứ tự hiển thị tab từ trái sang phải.
+        tab_definitions = [
+            (self.revenue, "Revenue"),
+            (self.telegram_tab, "Telegram Bot"),
+            (self.customers, "Customers"),
+            (self.orders, "Orders"),
+            (self.requests, "Requests"),
+            (self.licenses, "Licenses"),
+            (self.deliveries, "Delivery History"),            
+            (self.settings_tab, "Settings"),
+        ]
+
+        for tab, title in tab_definitions:
+            self.tabs.addTab(tab, title)
+
         layout.addWidget(self.tabs, 1)
         footer = QLabel("Issued ≠ sent ≠ activated  •  Request approval and retries remain in Telegram")
         footer.setProperty("role", "muted")
